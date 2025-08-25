@@ -1,0 +1,25 @@
+﻿# binaries
+*.exe
+thomasd_dbg.exe
+
+# logs & outputs
+*.log
+thomasd_out.log
+thomasd_err.log
+build_full.log
+
+# local keys (DO NOT COMMIT)
+dev_sk.b64
+
+# go build caches
+**/go-build/
+*.test
+
+# editors/OS
+.vscode/
+.idea/
+.DS_Store
+
+# our temporary backups
+*.bak_*
+*.fixwrap_only_*

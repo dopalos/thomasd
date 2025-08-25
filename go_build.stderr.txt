@@ -1,0 +1,3 @@
+# thomasd/internal/rpc
+internal\rpc\router.go:799:8: cannot use precheckSig(precheckCommit(mux)) (value of interface type http.Handler) as int value in return statement
+internal\rpc\router.go:799:35: undefined: mux
