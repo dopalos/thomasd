@@ -1,0 +1,16 @@
+﻿name: ci
+on:
+  push: { branches: [ main ], tags: [ "v*" ] }
+  pull_request:
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+      - name: Build
+        run: go build -tags "cbor blake3" ./cmd/thomasd
+      - name: Unit tests
+        run: go test ./... -count=1
