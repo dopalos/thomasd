@@ -28,3 +28,6 @@ build_full.log
 thomasd_out.log
 thomasd_err.log
 bindings.json
+thomasd_windows_*.zip
+checksums.txt
+thomasd*_dbg.exe*
