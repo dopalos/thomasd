@@ -76,3 +76,20 @@ func TestJsonizeSigErrors_Rewrites400(t *testing.T) {
         t.Fatalf("unexpected body: %s", w.Body.String())
     }
 }
+
+func TestJsonizeSigErrors_PassThrough200(t *testing.T) {
+    next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("X-Test", "ok")
+        w.WriteHeader(http.StatusOK)
+        w.Write([]byte(`{"ok":true,"applied":true}`))
+    })
+    h := jsonizeSigErrors(next)
+    w := httptest.NewRecorder()
+    h.ServeHTTP(w, req(`{}`, "PUB"))
+    if w.Code != http.StatusOK { t.Fatalf("code=%d", w.Code) }
+    if w.Header().Get("X-Test") != "ok" { t.Fatalf("header lost") }
+    var body map[string]any; _ = json.Unmarshal(w.Body.Bytes(), &body)
+    if body["ok"] != true || body["applied"] != true {
+        t.Fatalf("unexpected body: %s", w.Body.String())
+    }
+}

@@ -33,7 +33,8 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"crypto/ed25519"
-)
+
+	"expvar")
  
 
 
@@ -134,7 +135,12 @@ func NewRouter(eng *app.Engine) http.Handler {
 
 
     mux := http.NewServeMux()
-    mux = http.NewServeMux()
+
+
+
+
+
+    mux.Handle("/debug/vars", expvar.Handler())
     // --- Debug: echo ---
     mux.HandleFunc("/debug/echo", func(w http.ResponseWriter, r *http.Request) {
         b, _ := io.ReadAll(r.Body)
@@ -481,8 +487,7 @@ func NewRouter(eng *app.Engine) http.Handler {
 
     // --- TX 제출: POST /tx ---
     mux.HandleFunc("/tx", func(w http.ResponseWriter, r *http.Request) {
-    
-if r.Method != http.MethodPost {
+    if r.Method != http.MethodPost {
         w.WriteHeader(http.StatusMethodNotAllowed)
         return
     }
@@ -758,7 +763,7 @@ if r.Method != http.MethodPost {
             "time_utc": time.Now().UTC().Format(time.RFC3339),
         })
     })
-return debuglogRateLimit(txPrecheckWith(jsonizeSigErrors(precheckSig(precheckFromBinding(precheckCommit(mux)))), func() int64 { return int64(eng.CurrentHeight()) }))
+return debuglogRateLimit(txPrecheckWith(precheckSig(precheckFromBinding(precheckCommit(mux))), func() int64 { return int64(eng.CurrentHeight()) }))
 }
 
 // (옵션) SSE용 인터페이스
@@ -795,9 +800,9 @@ var expectedChainID = func() string {
 }()
 var feeBps = func() int {
     if v := os.Getenv("THOMAS_FEE_BPS"); v != "" {
-        if n,err := strconv.Atoi(v); err==nil && n>0 { return n }
+        if n, err := strconv.Atoi(v); err == nil && n > 0 { return n }
     }
-return 0
+    return 0
 }()
 
 func txPrecheckWith(next http.Handler, getHeight func() int64) http.Handler {
@@ -909,13 +914,6 @@ func precheckSig(next http.Handler) http.Handler {
     })
 }
 //// === END AUTO ===
-
-
-
-
-
-
-
 
 
 
