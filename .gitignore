@@ -23,3 +23,8 @@ dev_sk.b64
 # our temporary backups
 *.bak_*
 *.fixwrap_only_*
+thomasd_dbg.exe
+build_full.log
+thomasd_out.log
+thomasd_err.log
+bindings.json
