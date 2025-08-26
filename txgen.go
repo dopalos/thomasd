@@ -1,4 +1,6 @@
-﻿package main
+﻿//go:build ignore
+// CI auto-ignored helper tool
+package main
 
 import (
 "flag"
@@ -28,4 +30,5 @@ func main() {
     b, _ := cbor.Marshal(m)
     _ = os.WriteFile("tx.cbor", b, 0o644)
 }
+
 

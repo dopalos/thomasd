@@ -1,4 +1,6 @@
-﻿package main
+﻿//go:build ignore
+// CI auto-ignored helper tool
+package main
 
 import (
     "crypto/ed25519"
@@ -53,3 +55,4 @@ func main() {
         usage()
     }
 }
+

@@ -1,4 +1,6 @@
-﻿package main
+﻿//go:build ignore
+// CI auto-ignored helper tool
+package main
 import (
 "crypto/ed25519"
 "crypto/rand"
@@ -12,3 +14,4 @@ func main(){
  fmt.Println(base64.StdEncoding.EncodeToString(sk[32:]))
  fmt.Println(base64.StdEncoding.EncodeToString(ed25519.Sign(sk, m)))
 }
+
