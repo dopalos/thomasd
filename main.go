@@ -1,4 +1,6 @@
-﻿$code = @(
+﻿//go:build ignore
+// CI: ignored by auto-fix (non-Go header or stray chars)
+$code = @(
 'package main',
 '',
 'import (
@@ -25,4 +27,5 @@
 Set-Content .\cmd\thomasd\main.go -Value $code -Encoding UTF8
 
 Get-Item .\cmd\thomasd\main.go | Format-List FullName,Length,LastWriteTime
+
 

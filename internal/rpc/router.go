@@ -135,12 +135,31 @@ func NewRouter(eng *app.Engine) http.Handler {
 
 
     mux := http.NewServeMux()
-
 
 
 
 
-    mux.Handle("/debug/vars", expvar.Handler())
+
+    if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
+
+
+
+
+
+        if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
+
+
+
+
+
+            mux.Handle("/debug/vars", expvar.Handler())
+
+
+
+
+
+        }
+    }
     // --- Debug: echo ---
     mux.HandleFunc("/debug/echo", func(w http.ResponseWriter, r *http.Request) {
         b, _ := io.ReadAll(r.Body)
@@ -914,6 +933,8 @@ func precheckSig(next http.Handler) http.Handler {
     })
 }
 //// === END AUTO ===
+
+
 
 
 
