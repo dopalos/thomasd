@@ -1,0 +1,66 @@
+﻿name: release
+on:
+  push:
+    tags: [ "v*" ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+          cache: true
+      - name: Go mod download
+        run: go mod tidy && go mod download
+      - name: Unit tests
+        run: go test -v ./... -count=1
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos:   [linux, windows, darwin]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+          cache: true
+      - name: Build matrix
+        env:
+          GOOS:  ${{ matrix.goos }}
+          GOARCH:${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          set -e
+          APP=thomasd
+          OUT="${APP}_${GOOS}_${GOARCH}"
+          # build
+          if [ "${GOOS}" = "windows" ]; then OUT="${OUT}.exe"; fi
+          go build -v -tags "cbor blake3" -o "${OUT}" ./cmd/thomasd
+
+          # package
+          if [ "${GOOS}" = "windows" ]; then
+            PKG="${OUT%.exe}.zip"
+            zip -9 "${PKG}" "${OUT}"
+          else
+            PKG="${OUT}.tar.gz"
+            tar -czf "${PKG}" "${OUT}"
+          fi
+
+          # checksums
+          sha256sum "${PKG}" > "${PKG}.sha256"
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.tar.gz
+            *.zip
+            *.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
