@@ -65,7 +65,7 @@ if(-not $proc){
   $proc = Start-Process .\thomasd_dbg.exe -RedirectStandardOutput thomasd_out.log -RedirectStandardError thomasd_err.log -PassThru
   Start-Sleep 1
 }
-$base = Get-BaseUrl -ownerPid $proc.Id
+$base = Get-BaseUrl -ownerPid ((@($proc.Id))[0])
 "[readyz] $base/readyz"
 $ok=$false; for($i=0;$i -lt 50;$i++){
   try{ $rz = Invoke-WebRequest "$base/readyz" -Proxy $null -TimeoutSec 2; $jb = $rz.Content | ConvertFrom-Json; "[readyz] ok height=$($jb.height)"; $ok=$true; break }catch{}
@@ -141,3 +141,4 @@ PrintResult "5) wrong chain_id" $j5
 
 ""
 "=== done ==="
+

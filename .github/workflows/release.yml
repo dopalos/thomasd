@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (optional, e.g. v0.1.3)"
+        description: "Tag to release (optional, e.g. v0.1.4)"
         required: false
         default: ""
 
@@ -21,17 +21,21 @@ jobs:
       matrix:
         goos:   [linux, windows, darwin]
         goarch: [amd64, arm64]
+
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.inputs.tag || github.ref }}
+
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22.x"
           cache: true
+
       - name: Go mod download
         run: go mod tidy && go mod download
+
       - name: Build and package
         shell: bash
         run: |
@@ -40,35 +44,44 @@ jobs:
           REL="thomasd_${{ matrix.goos }}_${{ matrix.goarch }}"
           BIN="thomasd"
           [[ "${{ matrix.goos }}" == "windows" ]] && BIN="thomasd.exe"
-          mkdir -p "dist/$REL"
+
+          LDFLAGS="-X thomasd/internal/buildinfo.Version=${{ github.ref_name }} \
+                   -X thomasd/internal/buildinfo.Commit=${{ github.sha }} \
+                   -X thomasd/internal/buildinfo.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
-            go build -v -tags "cbor blake3" -o "dist/$REL/$BIN" ./cmd/thomasd
+            go build -v -tags "cbor blake3" -ldflags "$LDFLAGS" \
+            -o "dist/$REL/$BIN" ./cmd/thomasd
+
           pushd dist >/dev/null
           if [[ "${{ matrix.goos }}" == "windows" ]]; then
             zip -r "${REL}.zip" "$REL"
           else
             tar -czf "${REL}.tar.gz" "$REL"
           fi
-          sha256sum "${REL}."* >> checksums.txt
-          popd >/dev/null
+          # 각 매트릭스 조합별로 체크섬 파일을 따로 생성
+          sha256sum "${REL}."* > "checksums_${{ matrix.goos }}_${{ matrix.goarch }}.txt"
+
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
             dist/*.zip
             dist/*.tar.gz
-            dist/checksums.txt
+            dist/checksums_*.txt
 
   release:
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
+
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
       - name: Gather assets
         shell: bash
         run: |
@@ -77,13 +90,11 @@ jobs:
           shopt -s nullglob
           cp dist/*.zip upload/ 2>/dev/null || true
           cp dist/*.tar.gz upload/ 2>/dev/null || true
-          if ls dist/checksums.txt >/dev/null 2>&1; then
-            cat dist/checksums.txt > upload/checksums.txt
-          else
-            cat dist/*checksums*.txt > upload/checksums.txt || true
-          fi
+          # 분리된 체크섬들을 하나로 합치기
+          cat dist/checksums_*.txt > upload/checksums.txt
           ls -al upload
           test "$(ls -1 upload | wc -l)" -gt 0
+
       - name: Create GitHub Release and upload assets
         uses: softprops/action-gh-release@v2
         with:

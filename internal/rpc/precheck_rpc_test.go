@@ -93,3 +93,4 @@ func TestJsonizeSigErrors_PassThrough200(t *testing.T) {
         t.Fatalf("unexpected body: %s", w.Body.String())
     }
 }
+
