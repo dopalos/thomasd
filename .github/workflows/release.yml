@@ -68,16 +68,28 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          merge-multiple: true
       - name: Gather assets
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p upload
-          find dist -type f \( -name '*.zip' -o -name '*.tar.gz' -o -name 'checksums.txt' \) -print0 | xargs -0 -I{} cp {} upload/
+          shopt -s nullglob
+          cp dist/*.zip upload/ 2>/dev/null || true
+          cp dist/*.tar.gz upload/ 2>/dev/null || true
+          if ls dist/checksums.txt >/dev/null 2>&1; then
+            cat dist/checksums.txt > upload/checksums.txt
+          else
+            cat dist/*checksums*.txt > upload/checksums.txt || true
+          fi
           ls -al upload
+          test "$(ls -1 upload | wc -l)" -gt 0
       - name: Create GitHub Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: ${{ github.event.inputs.tag || github.ref_name }}
+          fail_on_unmatched_files: true
           files: |
             upload/*.zip
             upload/*.tar.gz
