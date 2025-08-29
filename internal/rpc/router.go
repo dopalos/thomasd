@@ -1,6 +1,9 @@
 ﻿package rpc
 
 import (
+	"thomasd/server"
+
+
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -119,7 +122,12 @@ func NewRouter(eng *app.Engine) http.Handler {
 
 	mux := http.NewServeMux()
 
-	if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
+	
+    // auto-patch: expose signed_msg & tx routes
+    server.SetExposeSignedMsg(true)
+  // server.RegisterSignedMsgRoutes(mux) // disabled to avoid /round/ conflict
+    server.RegisterTxRoutes(mux)
+if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 
 		if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 
@@ -278,7 +286,7 @@ func NewRouter(eng *app.Engine) http.Handler {
 	})
 
 	// --- TX 조회: GET /tx/{hash} ---
-	mux.HandleFunc("/tx/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/tx-disabled/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -840,6 +848,8 @@ var feeBps = func() int {
 
 func txPrecheckWith(next http.Handler, getHeight func() int64) http.Handler {
 	next = jsonizeSigErrors(next)
+
+	next = withJSONErrorFallback(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/tx" {
 			buf, _ := io.ReadAll(r.Body)
@@ -964,3 +974,36 @@ func precheckSig(next http.Handler) http.Handler {
 }
 
 //// === END AUTO ===
+//
+// withHealthPolicy adds GET /health and GET /policy without touching existing routes.
+func withHealthPolicy(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.Method == http.MethodGet && r.URL.Path == "/health" {
+            w.Header().Set("Content-Type", "application/json")
+            _ = json.NewEncoder(w).Encode(map[string]any{
+                "status":   "ok",
+                "time_utc": time.Now().UTC().Format(time.RFC3339),
+            })
+            return
+        }
+        if r.Method == http.MethodGet && r.URL.Path == "/policy" {
+            w.Header().Set("Content-Type", "application/json")
+            _ = json.NewEncoder(w).Encode(map[string]any{
+                "ok":     true,
+                "strict": os.Getenv("THOMAS_VERIFY_SIG") == "1",
+            })
+            return
+        }
+        next.ServeHTTP(w, r)
+    })
+}
+
+
+
+
+
+
+
+
+
+
