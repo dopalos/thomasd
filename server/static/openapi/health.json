@@ -2,11 +2,12 @@
   "paths": {
     "/health": {
       "get": {
-        "summary": "Health",
+        "tags": ["health"],
+        "summary": "Health check",
         "operationId": "getHealth",
         "responses": {
           "200": {
-            "description": "OK",
+            "description": "Service is healthy",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/HealthResponse" },
@@ -26,8 +27,9 @@
         "type": "object",
         "required": ["status"],
         "properties": {
-          "status": { "type": "string", "enum": ["ok", "degraded"], "example": "ok" }
-        }
+          "status": { "type": "string", "enum": ["ok"] }
+        },
+        "additionalProperties": true
       }
     }
   }

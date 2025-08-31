@@ -1,7 +1,10 @@
 ﻿name: ci
 on:
-  push: { branches: [ main ], tags: [ "v*" ] }
+  push:
+    branches: [ main ]
+    tags: [ "v*" ]
   pull_request:
+
 jobs:
   build-test:
     runs-on: ubuntu-latest
@@ -17,3 +20,56 @@ jobs:
         run: go build -v -tags "cbor blake3" ./cmd/thomasd
       - name: Unit tests
         run: go test -v ./... -count=1
+
+  docs-and-metrics:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+          cache: true
+
+      - name: Build thomasd (Windows)
+        shell: pwsh
+        run: |
+          go build -tags "cbor blake3" -o .\bin\thomasd.exe .\cmd\thomasd
+
+      - name: Merge OpenAPI fragments
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\openapi\merge_openapi.ps1
+
+      - name: Start thomasd (docs & metrics enabled)
+        shell: pwsh
+        run: |
+          $env:THOMAS_ENABLE_DOCS    = "1"
+          $env:THOMAS_ENABLE_METRICS = "1"
+          Start-Process -FilePath .\bin\thomasd.exe -WorkingDirectory . -WindowStyle Hidden
+          Start-Sleep 2
+
+      - name: Docs check
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\ci\docs_check.ps1
+
+      - name: Metrics check (strict)
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\ci\metrics_check.ps1 -Strict
+
+      - name: Stop thomasd
+        if: always()
+        shell: pwsh
+        run: |
+          Get-Process thomasd -ErrorAction SilentlyContinue | Stop-Process -Force
+
+                - name: Merge OpenAPI (generate merged.json)
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/openapi/merge_openapi.ps1
+
+      - name: Upload OpenAPI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi-json
+          path: server/static/openapi/merged.json

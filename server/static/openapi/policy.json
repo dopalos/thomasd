@@ -2,21 +2,23 @@
   "paths": {
     "/policy": {
       "get": {
-        "summary": "Node policy and limits",
+        "tags": ["policy"],
+        "summary": "Get node policy / chain information",
         "operationId": "getPolicy",
         "responses": {
           "200": {
-            "description": "Policy",
+            "description": "Policy / chain metadata",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/PolicyResponse" },
                 "examples": {
-                  "sample": {
-                    "value": {
-                      "min_fee_mas": 1,
-                      "tx_size_limit": 1048576
-                    }
-                  }
+                  "json": { "value": { "chain_id": "thomas-dev-1" } }
+                }
+              },
+              "text/plain": {
+                "schema": { "type": "string" },
+                "examples": {
+                  "plain": { "value": "chain_id=thomas-dev-1" }
                 }
               }
             }
@@ -29,12 +31,11 @@
     "schemas": {
       "PolicyResponse": {
         "type": "object",
-        "description": "Policy fields may evolve; unspecified fields are allowed.",
-        "additionalProperties": true,
+        "required": ["chain_id"],
         "properties": {
-          "min_fee_mas": { "type": "integer", "format": "int64" },
-          "tx_size_limit": { "type": "integer", "format": "int64" }
-        }
+          "chain_id": { "type": "string", "description": "Current chain ID" }
+        },
+        "additionalProperties": true
       }
     }
   }
