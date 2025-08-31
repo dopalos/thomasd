@@ -1,0 +1,145 @@
+﻿{
+  "paths": {
+    "/tx": {
+      "post": {
+        "summary": "Submit a transaction",
+        "operationId": "postTx",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["tx"],
+                "properties": {
+                  "tx": {
+                    "description": "Raw transaction (hex string, with or without 0x)",
+                    "allOf": [{ "$ref": "#/components/schemas/HexAny" }],
+                    "example": "0xDEADBEEF"
+                  },
+                  "debug": { "type": "boolean", "description": "Enable debug mode" },
+                  "debuglog": { "type": "boolean", "description": "Attach debug log in response" }
+                },
+                "additionalProperties": false
+              },
+              "examples": {
+                "sample": { "value": { "tx": "0xDEADBEEF" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Queued / parsed",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TxStatus" },
+                "examples": {
+                  "queued": {
+                    "value": {
+                      "amount": 0,
+                      "amount_mas": 0,
+                      "applied": false,
+                      "current_nonce": 0,
+                      "expected_fee_mas": 1,
+                      "expected_nonce": 1,
+                      "fee": 0,
+                      "fee_mas": 0,
+                      "from": "",
+                      "height": 18197,
+                      "merkle_root": "4e8019c1bb03bfb72e020cdbb39e15ef3a97a3570f433b5dced5bccd2069a29f",
+                      "nonce": 0,
+                      "ok": false,
+                      "parsed": true,
+                      "reason": "bad_chain_id",
+                      "receipts_count": 16841,
+                      "status": "queued",
+                      "time_utc": 1756564670,
+                      "to": "",
+                      "tx_hash": "381cdf6023387fff13e10673de5acf2f699b0a966945b771cd04baf3b05051d6"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          },
+          "500": {
+            "description": "Server error",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HexAny": {
+        "type": "string",
+        "pattern": "^(0x)?[0-9a-fA-F]+$",
+        "description": "Hex string with optional 0x prefix"
+      },
+      "Hex64": {
+        "type": "string",
+        "pattern": "^[0-9a-fA-F]{64}$",
+        "description": "32-byte hex string (64 hex chars)"
+      },
+      "Hex128": {
+        "type": "string",
+        "pattern": "^[0-9a-fA-F]{128}$",
+        "description": "64-byte hex string (128 hex chars)"
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": ["ok", "applied", "error"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "applied": { "type": "boolean" },
+          "error": {
+            "type": "object",
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "type": "string" },
+              "message": { "type": "string" },
+              "detail": { "type": "string" }
+            }
+          }
+        },
+        "example": {
+          "ok": false,
+          "applied": false,
+          "error": { "code": "bad_request", "message": "invalid tx" }
+        }
+      },
+      "TxStatus": {
+        "type": "object",
+        "required": ["ok", "status", "parsed", "tx_hash"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "status": { "type": "string", "enum": ["queued", "applied", "rejected", "unknown"] },
+          "reason": { "type": "string" },
+          "parsed": { "type": "boolean" },
+          "applied": { "type": "boolean" },
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "amount": { "type": "integer", "format": "int64" },
+          "amount_mas": { "type": "integer", "format": "int64" },
+          "fee": { "type": "integer", "format": "int64" },
+          "fee_mas": { "type": "integer", "format": "int64" },
+          "expected_fee_mas": { "type": "integer", "format": "int64" },
+          "nonce": { "type": "integer", "format": "int64" },
+          "current_nonce": { "type": "integer", "format": "int64" },
+          "expected_nonce": { "type": "integer", "format": "int64" },
+          "height": { "type": "integer", "format": "int64" },
+          "receipts_count": { "type": "integer", "format": "int64" },
+          "time_utc": { "type": "integer", "format": "int64", "description": "Unix epoch seconds (UTC)" },
+          "merkle_root": { "$ref": "#/components/schemas/Hex64" },
+          "tx_hash": { "$ref": "#/components/schemas/Hex64" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "paths": {
+    "/policy": {
+      "get": {
+        "summary": "Node policy and limits",
+        "operationId": "getPolicy",
+        "responses": {
+          "200": {
+            "description": "Policy",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PolicyResponse" },
+                "examples": {
+                  "sample": {
+                    "value": {
+                      "min_fee_mas": 1,
+                      "tx_size_limit": 1048576
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "PolicyResponse": {
+        "type": "object",
+        "description": "Policy fields may evolve; unspecified fields are allowed.",
+        "additionalProperties": true,
+        "properties": {
+          "min_fee_mas": { "type": "integer", "format": "int64" },
+          "tx_size_limit": { "type": "integer", "format": "int64" }
+        }
+      }
+    }
+  }
+}

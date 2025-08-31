@@ -1,0 +1,34 @@
+﻿{
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Health",
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HealthResponse" },
+                "examples": {
+                  "ok": { "value": { "status": "ok" } }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": { "type": "string", "enum": ["ok", "degraded"], "example": "ok" }
+        }
+      }
+    }
+  }
+}
