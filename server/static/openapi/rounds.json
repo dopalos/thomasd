@@ -3,31 +3,37 @@
     "/round/latest/signed": {
       "get": {
         "tags": ["rounds"],
-        "summary": "Get latest round header with signature",
+        "summary": "Get latest round with signature",
         "operationId": "getLatestSignedRound",
         "responses": {
           "200": {
-            "description": "Signed header of latest round",
+            "description": "Signed latest round",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/SignedResponse" },
                 "examples": {
-                  "latest": {
+                  "example": {
                     "value": {
-                      "round": 5,
                       "header": {
-                        "height": 18210,
-                        "time_utc": 1756639145,
-                        "tx_count": 16844,
-                        "merkle_root": "4fce119871b9b489cfb0a6a18aa30e1b8e5ec4c11e8288890c0a6bcf6ae7328e"
+                        "round": 5,
+                        "from_height": 18193,
+                        "to_height": 18212,
+                        "tx_count": 16846,
+                        "root": "e0f26435ae89...29f8621",
+                        "time_utc": 1756640561
                       },
-                      "signature": "BASE64_SIGNATURE",
-                      "scheme": "ed25519"
+                      "algo": "ed25519",
+                      "pubkey_hex": "4f0c...abcd",
+                      "signature_hex": "9a1b...ff00"
                     }
                   }
                 }
               }
             }
+          },
+          "404": {
+            "description": "No round",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
           }
         }
       }
@@ -35,39 +41,23 @@
     "/round/{round}/signed": {
       "get": {
         "tags": ["rounds"],
-        "summary": "Get specific round header with signature",
+        "summary": "Get round N with signature",
         "operationId": "getSignedRound",
         "parameters": [
           {
             "name": "round",
             "in": "path",
             "required": true,
-            "schema": { "type": "integer", "format": "int64", "minimum": 0 },
-            "description": "Round number"
+            "schema": { "type": "integer", "minimum": 1 }
           }
         ],
         "responses": {
           "200": {
-            "description": "Signed header of the requested round",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/SignedResponse" }
-              }
-            }
+            "description": "Signed round",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SignedResponse" } } }
           },
-          "404": {
-            "description": "Round not found",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/ErrorResponse" },
-                "examples": {
-                  "not_found": {
-                    "value": { "code": "round_not_found", "message": "round 123 not found" }
-                  }
-                }
-              }
-            }
-          }
+          "400": { "description": "Bad round id", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "404": { "description": "Not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
         }
       }
     }
@@ -76,40 +66,33 @@
     "schemas": {
       "RoundHeader": {
         "type": "object",
-        "required": ["height", "time_utc", "tx_count", "merkle_root"],
+        "required": ["round", "from_height", "to_height", "tx_count", "root", "time_utc"],
         "properties": {
-          "height": { "type": "integer", "format": "int64" },
-          "time_utc": { "type": "integer", "format": "int64", "description": "UNIX seconds" },
-          "tx_count": { "type": "integer", "format": "int64" },
-          "merkle_root": { "type": "string" }
+          "round": { "type": "integer" },
+          "from_height": { "type": "integer" },
+          "to_height": { "type": "integer" },
+          "tx_count": { "type": "integer" },
+          "root": { "type": "string", "description": "Merkle root (hex)" },
+          "time_utc": { "type": "integer", "description": "Unix seconds (UTC)" }
         },
         "additionalProperties": true
       },
       "SignedResponse": {
         "type": "object",
-        "required": ["round", "header", "signature"],
+        "required": ["header", "pubkey_hex"],
         "properties": {
-          "round": { "type": "integer", "format": "int64" },
           "header": { "$ref": "#/components/schemas/RoundHeader" },
-          "signature": { "type": "string", "description": "Signature over header" },
-          "signer": { "type": "string", "description": "Signer identity (optional)" },
-          "scheme": {
-            "type": "string",
-            "description": "Signature scheme. Compat layer injects 'ed25519' when empty.",
-            "default": "ed25519"
-          }
+          "algo": { "type": "string", "description": "Signing scheme, e.g. 'ed25519'" },
+          "scheme": { "type": "string", "description": "(compat) may be present instead of 'algo'" },
+          "pubkey_hex": { "type": "string", "description": "hex-encoded public key" },
+          "signature_hex": { "type": "string", "description": "hex-encoded signature" }
         },
         "additionalProperties": true
       },
       "ErrorResponse": {
         "type": "object",
-        "required": ["code", "message"],
-        "properties": {
-          "code": { "type": "string" },
-          "message": { "type": "string" },
-          "meta": { "type": "object", "additionalProperties": true }
-        },
-        "additionalProperties": false
+        "properties": { "error": { "type": "string" } },
+        "additionalProperties": true
       }
     }
   }

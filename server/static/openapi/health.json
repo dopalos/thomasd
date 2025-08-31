@@ -1,4 +1,6 @@
 ﻿{
+  "openapi": "3.0.3",
+  "info": { "title": "thomasd API", "version": "0.1.0" },
   "paths": {
     "/health": {
       "get": {
@@ -7,12 +9,14 @@
         "operationId": "getHealth",
         "responses": {
           "200": {
-            "description": "Service is healthy",
+            "description": "Healthy",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/HealthResponse" },
                 "examples": {
-                  "ok": { "value": { "status": "ok" } }
+                  "ok": {
+                    "value": { "status": "ok", "time_utc": "2025-08-31T11:22:33Z" }
+                  }
                 }
               }
             }
@@ -25,10 +29,19 @@
     "schemas": {
       "HealthResponse": {
         "type": "object",
-        "required": ["status"],
+        "required": ["status", "time_utc"],
         "properties": {
-          "status": { "type": "string", "enum": ["ok"] }
+          "status": { "type": "string", "enum": ["ok"] },
+          "time_utc": {
+            "type": "string",
+            "description": "RFC3339 UTC timestamp (server clock)"
+          }
         },
+        "additionalProperties": true
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": { "error": { "type": "string" } },
         "additionalProperties": true
       }
     }
