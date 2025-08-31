@@ -1,107 +1,40 @@
-﻿name: release
-
+﻿name: release-assets
 on:
-  push:
-    tags: [ "v*" ]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to release (optional, e.g. v0.1.4)"
-        required: false
-        default: ""
-
-permissions:
-  contents: write
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        goos:   [linux, windows, darwin]
-        goarch: [amd64, arm64]
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ github.event.inputs.tag || github.ref }}
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.22.x"
-          cache: true
-
-      - name: Go mod download
-        run: go mod tidy && go mod download
-
-      - name: Build and package
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          REL="thomasd_${{ matrix.goos }}_${{ matrix.goarch }}"
-          BIN="thomasd"
-          [[ "${{ matrix.goos }}" == "windows" ]] && BIN="thomasd.exe"
-
-          LDFLAGS="-X thomasd/internal/buildinfo.Version=${{ github.ref_name }} \
-                   -X thomasd/internal/buildinfo.Commit=${{ github.sha }} \
-                   -X thomasd/internal/buildinfo.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
-            go build -v -tags "cbor blake3" -ldflags "$LDFLAGS" \
-            -o "dist/$REL/$BIN" ./cmd/thomasd
-
-          pushd dist >/dev/null
-          if [[ "${{ matrix.goos }}" == "windows" ]]; then
-            zip -r "${REL}.zip" "$REL"
-          else
-            tar -czf "${REL}.tar.gz" "$REL"
-          fi
-          # 각 매트릭스 조합별로 체크섬 파일을 따로 생성
-          sha256sum "${REL}."* > "checksums_${{ matrix.goos }}_${{ matrix.goarch }}.txt"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: |
-            dist/*.zip
-            dist/*.tar.gz
-            dist/checksums_*.txt
-
   release:
-    needs: build
-    runs-on: ubuntu-latest
+    types: [published]   # GitHub Release 공개 시 동작
+jobs:
+  build-and-upload:
+    runs-on: windows-latest
     permissions:
       contents: write
-
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          path: dist
-          merge-multiple: true
+          go-version: '1.25.x'
 
-      - name: Gather assets
-        shell: bash
+      - name: Merge OpenAPI fragments
+        shell: pwsh
         run: |
-          set -euo pipefail
-          mkdir -p upload
-          shopt -s nullglob
-          cp dist/*.zip upload/ 2>/dev/null || true
-          cp dist/*.tar.gz upload/ 2>/dev/null || true
-          # 분리된 체크섬들을 하나로 합치기
-          cat dist/checksums_*.txt > upload/checksums.txt
-          ls -al upload
-          test "$(ls -1 upload | wc -l)" -gt 0
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\openapi\merge_openapi.ps1
+          Get-Item .\server\static\openapi\merged.json | Format-List *
 
-      - name: Create GitHub Release and upload assets
+      - name: Generate Postman collection
+        shell: pwsh
+        run: |
+          http://127.0.0.1:63957 = "http://127.0.0.1:62533"
+          powershell -NoProfile -ExecutionPolicy Bypass 
+            -File .\tools\openapi\write-postman.ps1 
+            -Merged .\server\static\openapi\merged.json 
+            -Out .\dist\thomasd-postman.json 
+            -BaseForVar http://127.0.0.1:63957
+          Get-Item .\dist\thomasd-postman.json | Format-List *
+
+      - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: ${{ github.event.inputs.tag || github.ref_name }}
-          fail_on_unmatched_files: true
           files: |
-            upload/*.zip
-            upload/*.tar.gz
-            upload/checksums.txt
+            server/static/openapi/merged.json
+            dist/thomasd-postman.json
