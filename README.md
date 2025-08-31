@@ -41,3 +41,29 @@ $BASE=(Select-String -Path .\run_logs\out_*.txt -Pattern 'listening on (http://[
 (Invoke-RestMethod "$BASE/openapi/merged.json").openapi
 curl.exe -sI "$BASE/docs/" | findstr /C:"200"
 (Invoke-RestMethod "$BASE/metrics") -as [string] | findstr thomas_health_ok
+
+
+# thomasd — docs & metrics quickstart
+
+## Quick start
+```powershell
+# 실행 (문서/메트릭 노출)
+$env:THOMAS_ENABLE_DOCS="1"
+$env:THOMAS_ENABLE_METRICS="1"
+.\bin\thomasd.exe
+
+
+## Release (자동 자산 첨부)
+GitHub Release를 만들면 워크플로가 아래 파일을 자동으로 첨부합니다:
+- `server/static/openapi/merged.json`
+- `dist/thomasd-postman.json`
+
+필요 시 수동 실행:
+```powershell
+# 병합
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\openapi\merge_openapi.ps1
+# Postman
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\openapi\write-postman.ps1 `
+  -Merged .\server\static\openapi\merged.json `
+  -Out .\dist\thomasd-postman.json `
+  -BaseForVar "$BASE"
