@@ -1,0 +1,73 @@
+{
+  "paths": {
+    "/policy": {
+      "get": {
+        "tags": ["policy"],
+        "summary": "Get node policy / chain rules",
+        "operationId": "getPolicy",
+        "responses": {
+          "200": {
+            "description": "Policy / chain metadata",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PolicyResponse" },
+                "examples": {
+                  "dev": {
+                    "value": {
+                      "unit": "mas",
+                      "fee_bps": 10,
+                      "min_fee_mas": 1,
+                      "max_msg_commit_len": 64,
+                      "allowed_chain_id": "thomas-dev-1",
+                      "expiry_rule": "valid if expiry_height==0 OR current_height < expiry_height",
+                      "signing": {
+                        "algo": "ed25519",
+                        "pubkey_hex": "4f0c...abcd",
+                        "header_canonical": ["round", "from_height", "to_height", "tx_count", "root", "time_utc"]
+                      }
+                    }
+                  }
+                }
+              },
+              "text/plain": {
+                "schema": { "type": "string" },
+                "examples": { "plain": { "value": "thomas-dev-1" } }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "PolicyResponse": {
+        "type": "object",
+        "required": ["allowed_chain_id", "signing"],
+        "properties": {
+          "unit": { "type": "string", "example": "mas" },
+          "fee_bps": { "type": "integer", "description": "Fee in basis points (0.1% = 10)", "example": 10 },
+          "min_fee_mas": { "type": "integer", "example": 1 },
+          "max_msg_commit_len": { "type": "integer", "example": 64 },
+          "allowed_chain_id": { "type": "string", "example": "thomas-dev-1" },
+          "expiry_rule": { "type": "string" },
+          "signing": {
+            "type": "object",
+            "required": ["algo", "pubkey_hex"],
+            "properties": {
+              "algo": { "type": "string", "example": "ed25519" },
+              "pubkey_hex": { "type": "string", "description": "hex-encoded public key" },
+              "header_canonical": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Canonical header field order"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  }
+}

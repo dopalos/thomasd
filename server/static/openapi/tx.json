@@ -1,0 +1,141 @@
+﻿{
+  "paths": {
+    "/tx": {
+      "post": {
+        "tags": ["tx"],
+        "summary": "Submit a transfer",
+        "operationId": "postTx",
+        "parameters": [
+          {
+            "name": "debug",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "enum": ["skipapply"] },
+            "description": "Reserved. For legacy /tx_old only; current /tx ignores this."
+          },
+          {
+            "name": "debuglog",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "boolean" },
+            "description": "Emit verbose logs (if supported). No-op otherwise."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/TxRequest" },
+              "examples": {
+                "ok": {
+                  "value": {
+                    "type": 1,
+                    "from": "tho1alice",
+                    "to": "tho1bob",
+                    "amount_mas": 100000,
+                    "fee_mas": 100,
+                    "nonce": 4935,
+                    "expiry_height": 0,
+                    "chain_id": "thomas-dev-1",
+                    "msg_commitment": "d20bece125baf11c1f7c0dfff8b20ca575941cb86f2fc521068b2653a75cd3c4"
+                  }
+                }
+              }
+            },
+            "application/cbor": {
+              "schema": { "type": "string", "format": "binary" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted / queued with status",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TxStatus" },
+                "examples": {
+                  "bad_nonce": {
+                    "value": {
+                      "status": "queued",
+                      "parsed": true,
+                      "ok": true,
+                      "applied": false,
+                      "reason": "apply:bad_nonce",
+                      "tx_hash": "c8a9...7de00",
+                      "from": "tho1alice",
+                      "to": "tho1bob",
+                      "amount_mas": 100000,
+                      "fee_mas": 100,
+                      "amount": 10000,
+                      "fee": 10,
+                      "nonce": 4935,
+                      "height": 18207,
+                      "time_utc": 1756620735,
+                      "current_nonce": 4940,
+                      "expected_nonce": 4941,
+                      "expected_fee_mas": 100,
+                      "merkle_root": "6e6c9c0f...ae51c08",
+                      "receipts_count": 16843
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "TxRequest": {
+        "type": "object",
+        "required": ["type", "from", "to", "amount_mas", "fee_mas", "nonce", "chain_id"],
+        "properties": {
+          "type": { "type": "integer", "enum": [1], "description": "Transfer = 1" },
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "amount_mas": { "type": "integer", "minimum": 1 },
+          "fee_mas": { "type": "integer", "minimum": 1, "description": ">= max(1, amount_mas*0.1%)" },
+          "nonce": { "type": "integer", "minimum": 0 },
+          "expiry_height": { "type": "integer", "minimum": 0, "description": "0 means no expiry" },
+          "chain_id": { "type": "string", "example": "thomas-dev-1" },
+          "msg_commitment": { "type": "string", "description": "Optional commitment (hex), <= 64 bytes" }
+        },
+        "additionalProperties": false
+      },
+      "TxStatus": {
+        "type": "object",
+        "required": ["status", "parsed", "ok", "applied"],
+        "properties": {
+          "status": { "type": "string", "example": "queued" },
+          "parsed": { "type": "boolean" },
+          "ok": { "type": "boolean" },
+          "applied": { "type": "boolean" },
+          "reason": { "type": "string" },
+          "tx_hash": { "type": "string" },
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "amount_mas": { "type": "integer" },
+          "fee_mas": { "type": "integer" },
+          "amount": { "type": "integer", "description": "Display unit (mas → micro-THO)" },
+          "fee": { "type": "integer", "description": "Display unit (mas → micro-THO)" },
+          "nonce": { "type": "integer" },
+          "height": { "type": "integer" },
+          "time_utc": { "type": "integer", "description": "Unix seconds (UTC)" },
+          "current_nonce": { "type": "integer" },
+          "expected_nonce": { "type": "integer" },
+          "expected_fee_mas": { "type": "integer" },
+          "merkle_root": { "type": "string" },
+          "receipts_count": { "type": "integer" }
+        },
+        "additionalProperties": true
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": { "error": { "type": "string" } },
+        "additionalProperties": true
+      }
+    }
+  }
+}
