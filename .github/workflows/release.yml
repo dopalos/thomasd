@@ -1,7 +1,14 @@
 ﻿name: release-assets
+
 on:
   release:
-    types: [published]   # GitHub Release 공개 시 동작
+    types: [published]        # 릴리스 공개 시 자동 실행
+  workflow_dispatch:          # 필요 시 수동 실행
+    inputs:
+      tag:
+        description: 'Release tag to attach assets to (e.g., v0.1.6)'
+        required: false
+
 jobs:
   build-and-upload:
     runs-on: windows-latest
@@ -10,6 +17,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -24,17 +32,18 @@ jobs:
       - name: Generate Postman collection
         shell: pwsh
         run: |
-          http://127.0.0.1:63957 = "http://127.0.0.1:62533"
-          powershell -NoProfile -ExecutionPolicy Bypass 
-            -File .\tools\openapi\write-postman.ps1 
-            -Merged .\server\static\openapi\merged.json 
-            -Out .\dist\thomasd-postman.json 
-            -BaseForVar http://127.0.0.1:63957
+          powershell -NoProfile -ExecutionPolicy Bypass `
+            -File .\tools\openapi\write-postman.ps1 `
+            -Merged .\server\static\openapi\merged.json `
+            -Out .\dist\thomasd-postman.json `
+            -BaseForVar "http://127.0.0.1:62533"
           Get-Item .\dist\thomasd-postman.json | Format-List *
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
+          # release 이벤트면 github.ref_name(=태그), 수동 실행이면 입력값 사용
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: |
             server/static/openapi/merged.json
             dist/thomasd-postman.json
