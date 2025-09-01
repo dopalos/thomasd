@@ -44,12 +44,15 @@ jobs:
           Get-Item .\dist\thomasd-postman.json | Format-List *
 
       - name: Upload to release
-        if: ${{ env.TAG != '' }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.TAG }}
+          # release 이벤트면 해당 릴리스 태그로, 수동 dispatch면 입력값(tag)으로
+          tag_name: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
           files: |
             server/static/openapi/merged.json
             dist/thomasd-postman.json
           fail_on_unmatched_files: true
           allow_updates: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
