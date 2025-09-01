@@ -39,3 +39,9 @@ curl.exe -sI "http://127.0.0.1:63081/round/latest/signed_msg" | findstr /C:"200"
 1) 위 컬렉션(JSON) 다운로드 → Postman `Import`.
 2) `baseUrl` 변수를 원하는 엔드포인트로 설정 (기본값: `http://127.0.0.1:62533`).
 3) 필요한 경우 `Authorization` 전역 변수를 환경에 추가.
+
+
+## API Assets
+- OpenAPI (merged): https://github.com/dopalos/thomasd/releases/latest/download/merged.json
+- Postman Collection: https://github.com/dopalos/thomasd/releases/latest/download/thomasd-postman.json
+
