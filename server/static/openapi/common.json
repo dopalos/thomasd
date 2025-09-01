@@ -1,0 +1,142 @@
+{
+  "components": {
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": { "type": "string", "enum": ["ok"] },
+          "time_utc": { "type": "string", "format": "date-time", "description": "RFC3339 UTC time" }
+        },
+        "additionalProperties": true
+      },
+      "PolicySigning": {
+        "type": "object",
+        "required": ["algo", "pubkey_hex", "header_canonical"],
+        "properties": {
+          "algo": { "type": "string", "enum": ["ed25519"] },
+          "pubkey_hex": { "type": "string", "description": "Validator pubkey (hex)" },
+          "header_canonical": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Canonical header field order used for signing"
+          }
+        }
+      },
+      "PolicyResponse": {
+        "type": "object",
+        "required": ["allowed_chain_id", "fee_bps", "min_fee_mas", "max_msg_commit_len", "signing"],
+        "properties": {
+          "unit": { "type": "string", "example": "mas" },
+          "fee_bps": { "type": "integer", "example": 10, "description": "Fee in basis points (0.1% = 10bps)" },
+          "min_fee_mas": { "type": "integer", "example": 1 },
+          "max_msg_commit_len": { "type": "integer", "example": 64 },
+          "allowed_chain_id": { "type": "string", "example": "thomas-dev-1" },
+          "expiry_rule": { "type": "string" },
+          "signing": { "$ref": "#/components/schemas/PolicySigning" }
+        },
+        "additionalProperties": true
+      },
+      "RoundHeader": {
+        "type": "object",
+        "required": ["round", "from_height", "to_height", "tx_count", "root", "time_utc"],
+        "properties": {
+          "round": { "type": "integer", "minimum": 1 },
+          "from_height": { "type": "integer", "minimum": 0 },
+          "to_height": { "type": "integer", "minimum": 0 },
+          "tx_count": { "type": "integer", "minimum": 0 },
+          "root": { "type": "string", "description": "Merkle root (hex)" },
+          "time_utc": { "type": "integer", "description": "Unix seconds (UTC)" }
+        },
+        "additionalProperties": true
+      },
+      "SignedResponse": {
+        "type": "object",
+        "required": ["header", "algo", "pubkey_hex", "signature_hex"],
+        "properties": {
+          "header": { "$ref": "#/components/schemas/RoundHeader" },
+          "algo": { "type": "string", "enum": ["ed25519"] },
+          "pubkey_hex": { "type": "string" },
+          "signature_hex": { "type": "string" }
+        }
+      },
+      "TxRequest": {
+        "type": "object",
+        "required": ["type", "from", "to", "amount_mas", "fee_mas", "nonce", "expiry_height", "chain_id"],
+        "properties": {
+          "type": { "type": "integer", "enum": [1], "description": "1=transfer" },
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "amount_mas": { "type": "integer", "minimum": 0 },
+          "fee_mas": { "type": "integer", "minimum": 0 },
+          "nonce": { "type": "integer", "minimum": 0 },
+          "expiry_height": { "type": "integer", "minimum": 0, "description": "0=never expires" },
+          "chain_id": { "type": "string", "example": "thomas-dev-1" },
+          "msg_commitment": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "Optional message commitment (hex)"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TxResponse": {
+        "type": "object",
+        "required": ["status", "parsed", "ok", "applied"],
+        "properties": {
+          "status": { "type": "string", "example": "queued" },
+          "parsed": { "type": "boolean" },
+          "ok": { "type": "boolean" },
+          "applied": { "type": "boolean" },
+          "reason": { "type": "string" },
+          "tx_hash": { "type": "string" },
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "amount_mas": { "type": "integer" },
+          "fee_mas": { "type": "integer" },
+          "amount": { "type": "integer", "description": "Display helper" },
+          "fee": { "type": "integer", "description": "Display helper" },
+          "nonce": { "type": "integer" },
+          "height": { "type": "integer" },
+          "time_utc": { "type": "integer" },
+          "current_nonce": { "type": "integer" },
+          "expected_nonce": { "type": "integer" },
+          "expected_fee_mas": { "type": "integer" },
+          "merkle_root": { "type": "string" },
+          "receipts_count": { "type": "integer" }
+        },
+        "additionalProperties": true
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": ["code", "message"],
+        "properties": {
+          "code": { "type": "string", "example": "bad_request" },
+          "message": { "type": "string" }
+        }
+      }
+    },
+    "parameters": {
+      "RoundParam": {
+        "name": "round",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "integer", "minimum": 1 }
+      },
+      "DebugParam": {
+        "name": "debug",
+        "in": "query",
+        "required": false,
+        "schema": { "type": "string", "enum": ["skipapply"] },
+        "description": "Internal debug switch; skip apply and return quickly"
+      },
+      "DebuglogParam": {
+        "name": "debuglog",
+        "in": "query",
+        "required": false,
+        "schema": { "type": "boolean" },
+        "description": "Enable verbose logs for troubleshooting"
+      }
+    }
+  }
+}

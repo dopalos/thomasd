@@ -1,7 +1,7 @@
-﻿package codec
+package codec
 
 import (
-"encoding/json"
+	"encoding/json"
 	"thomasd/internal/tx"
 )
 
@@ -12,4 +12,3 @@ func DecodeJSON(b []byte, out *tx.Transfer) error {
 	}
 	return json.Unmarshal(b, out)
 }
-

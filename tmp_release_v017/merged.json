@@ -1,0 +1,521 @@
+﻿{
+    "servers":  [
+                    {
+                        "url":  "/"
+                    }
+                ],
+    "paths":  {
+                  "/tx":  {
+                              "post":  {
+                                           "parameters":  [
+                                                              {
+                                                                  "description":  "Reserved. For legacy /tx_old only; current /tx ignores this.",
+                                                                  "name":  "debug",
+                                                                  "in":  "query",
+                                                                  "schema":  {
+                                                                                 "type":  "string",
+                                                                                 "enum":  "skipapply"
+                                                                             },
+                                                                  "required":  false
+                                                              },
+                                                              {
+                                                                  "description":  "Emit verbose logs (if supported). No-op otherwise.",
+                                                                  "name":  "debuglog",
+                                                                  "in":  "query",
+                                                                  "schema":  {
+                                                                                 "type":  "boolean"
+                                                                             },
+                                                                  "required":  false
+                                                              }
+                                                          ],
+                                           "summary":  "Submit a transfer",
+                                           "responses":  {
+                                                             "200":  {
+                                                                         "content":  {
+                                                                                         "application/json":  {
+                                                                                                                  "schema":  {
+                                                                                                                                 "$ref":  "#/components/schemas/TxStatus"
+                                                                                                                             },
+                                                                                                                  "examples":  {
+                                                                                                                                   "bad_nonce":  {
+                                                                                                                                                     "value":  {
+                                                                                                                                                                   "to":  "tho1bob",
+                                                                                                                                                                   "nonce":  4935,
+                                                                                                                                                                   "amount_mas":  100000,
+                                                                                                                                                                   "applied":  false,
+                                                                                                                                                                   "expected_fee_mas":  100,
+                                                                                                                                                                   "height":  18207,
+                                                                                                                                                                   "current_nonce":  4940,
+                                                                                                                                                                   "fee_mas":  100,
+                                                                                                                                                                   "receipts_count":  16843,
+                                                                                                                                                                   "fee":  10,
+                                                                                                                                                                   "reason":  "apply:bad_nonce",
+                                                                                                                                                                   "tx_hash":  "c8a9...7de00",
+                                                                                                                                                                   "parsed":  true,
+                                                                                                                                                                   "merkle_root":  "6e6c9c0f...ae51c08",
+                                                                                                                                                                   "time_utc":  1756620735,
+                                                                                                                                                                   "expected_nonce":  4941,
+                                                                                                                                                                   "amount":  10000,
+                                                                                                                                                                   "status":  "queued",
+                                                                                                                                                                   "from":  "tho1alice",
+                                                                                                                                                                   "ok":  true
+                                                                                                                                                               }
+                                                                                                                                                 }
+                                                                                                                               }
+                                                                                                              }
+                                                                                     },
+                                                                         "description":  "Accepted / queued with status"
+                                                                     }
+                                                         },
+                                           "requestBody":  {
+                                                               "content":  {
+                                                                               "application/json":  {
+                                                                                                        "schema":  {
+                                                                                                                       "$ref":  "#/components/schemas/TxRequest"
+                                                                                                                   },
+                                                                                                        "examples":  {
+                                                                                                                         "ok":  {
+                                                                                                                                    "value":  {
+                                                                                                                                                  "amount_mas":  100000,
+                                                                                                                                                  "type":  1,
+                                                                                                                                                  "expiry_height":  0,
+                                                                                                                                                  "nonce":  4935,
+                                                                                                                                                  "from":  "tho1alice",
+                                                                                                                                                  "fee_mas":  100,
+                                                                                                                                                  "chain_id":  "thomas-dev-1",
+                                                                                                                                                  "msg_commitment":  "d20bece125baf11c1f7c0dfff8b20ca575941cb86f2fc521068b2653a75cd3c4",
+                                                                                                                                                  "to":  "tho1bob"
+                                                                                                                                              }
+                                                                                                                                }
+                                                                                                                     }
+                                                                                                    },
+                                                                               "application/cbor":  {
+                                                                                                        "schema":  {
+                                                                                                                       "type":  "string",
+                                                                                                                       "format":  "binary"
+                                                                                                                   }
+                                                                                                    }
+                                                                           },
+                                                               "required":  true
+                                                           },
+                                           "operationId":  "postTx",
+                                           "tags":  "tx"
+                                       }
+                          },
+                  "/policy":  {
+                                  "get":  {
+                                              "summary":  "Get node policy / chain rules",
+                                              "tags":  "policy",
+                                              "responses":  {
+                                                                "200":  {
+                                                                            "content":  {
+                                                                                            "application/json":  {
+                                                                                                                     "schema":  {
+                                                                                                                                    "$ref":  "#/components/schemas/PolicyResponse"
+                                                                                                                                },
+                                                                                                                     "examples":  {
+                                                                                                                                      "dev":  {
+                                                                                                                                                  "value":  {
+                                                                                                                                                                "max_msg_commit_len":  64,
+                                                                                                                                                                "allowed_chain_id":  "thomas-dev-1",
+                                                                                                                                                                "expiry_rule":  "valid if expiry_height==0 OR current_height \u003c expiry_height",
+                                                                                                                                                                "min_fee_mas":  1,
+                                                                                                                                                                "signing":  {
+                                                                                                                                                                                "algo":  "ed25519",
+                                                                                                                                                                                "header_canonical":  [
+                                                                                                                                                                                                         "round",
+                                                                                                                                                                                                         "from_height",
+                                                                                                                                                                                                         "to_height",
+                                                                                                                                                                                                         "tx_count",
+                                                                                                                                                                                                         "root",
+                                                                                                                                                                                                         "time_utc"
+                                                                                                                                                                                                     ],
+                                                                                                                                                                                "pubkey_hex":  "4f0c...abcd"
+                                                                                                                                                                            },
+                                                                                                                                                                "fee_bps":  10,
+                                                                                                                                                                "unit":  "mas"
+                                                                                                                                                            }
+                                                                                                                                              }
+                                                                                                                                  }
+                                                                                                                 },
+                                                                                            "text/plain":  {
+                                                                                                               "schema":  {
+                                                                                                                              "type":  "string"
+                                                                                                                          },
+                                                                                                               "examples":  {
+                                                                                                                                "plain":  {
+                                                                                                                                              "value":  "thomas-dev-1"
+                                                                                                                                          }
+                                                                                                                            }
+                                                                                                           }
+                                                                                        },
+                                                                            "description":  "Policy / chain metadata"
+                                                                        }
+                                                            },
+                                              "operationId":  "getPolicy"
+                                          }
+                              },
+                  "/round/{round}/signed":  {
+                                                "get":  {
+                                                            "summary":  "Get round N with signature",
+                                                            "tags":  "rounds",
+                                                            "parameters":  {
+                                                                               "name":  "round",
+                                                                               "in":  "path",
+                                                                               "schema":  {
+                                                                                              "type":  "integer",
+                                                                                              "minimum":  1
+                                                                                          },
+                                                                               "required":  true
+                                                                           },
+                                                            "responses":  {
+                                                                              "404":  {
+                                                                                          "content":  {
+                                                                                                          "application/json":  {
+                                                                                                                                   "schema":  {
+                                                                                                                                                  "$ref":  "#/components/schemas/ErrorResponse"
+                                                                                                                                              }
+                                                                                                                               }
+                                                                                                      },
+                                                                                          "description":  "Not found"
+                                                                                      },
+                                                                              "400":  {
+                                                                                          "content":  {
+                                                                                                          "application/json":  {
+                                                                                                                                   "schema":  {
+                                                                                                                                                  "$ref":  "#/components/schemas/ErrorResponse"
+                                                                                                                                              }
+                                                                                                                               }
+                                                                                                      },
+                                                                                          "description":  "Bad round id"
+                                                                                      },
+                                                                              "200":  {
+                                                                                          "content":  {
+                                                                                                          "application/json":  {
+                                                                                                                                   "schema":  {
+                                                                                                                                                  "$ref":  "#/components/schemas/SignedResponse"
+                                                                                                                                              }
+                                                                                                                               }
+                                                                                                      },
+                                                                                          "description":  "Signed round"
+                                                                                      }
+                                                                          },
+                                                            "operationId":  "getSignedRound"
+                                                        }
+                                            },
+                  "/round/latest/signed":  {
+                                               "get":  {
+                                                           "summary":  "Get latest round with signature",
+                                                           "tags":  "rounds",
+                                                           "responses":  {
+                                                                             "200":  {
+                                                                                         "content":  {
+                                                                                                         "application/json":  {
+                                                                                                                                  "schema":  {
+                                                                                                                                                 "$ref":  "#/components/schemas/SignedResponse"
+                                                                                                                                             },
+                                                                                                                                  "examples":  {
+                                                                                                                                                   "example":  {
+                                                                                                                                                                   "value":  {
+                                                                                                                                                                                 "algo":  "ed25519",
+                                                                                                                                                                                 "signature_hex":  "9a1b...ff00",
+                                                                                                                                                                                 "header":  {
+                                                                                                                                                                                                "to_height":  18212,
+                                                                                                                                                                                                "round":  5,
+                                                                                                                                                                                                "root":  "e0f26435ae89...29f8621",
+                                                                                                                                                                                                "tx_count":  16846,
+                                                                                                                                                                                                "from_height":  18193,
+                                                                                                                                                                                                "time_utc":  1756640561
+                                                                                                                                                                                            },
+                                                                                                                                                                                 "pubkey_hex":  "4f0c...abcd"
+                                                                                                                                                                             }
+                                                                                                                                                               }
+                                                                                                                                               }
+                                                                                                                              }
+                                                                                                     },
+                                                                                         "description":  "Signed latest round"
+                                                                                     },
+                                                                             "404":  {
+                                                                                         "content":  {
+                                                                                                         "application/json":  {
+                                                                                                                                  "schema":  {
+                                                                                                                                                 "$ref":  "#/components/schemas/ErrorResponse"
+                                                                                                                                             }
+                                                                                                                              }
+                                                                                                     },
+                                                                                         "description":  "No round"
+                                                                                     }
+                                                                         },
+                                                           "operationId":  "getLatestSignedRound"
+                                                       }
+                                           }
+              },
+    "components":  {
+                       "schemas":  {
+                                       "TxStatus":  {
+                                                        "additionalProperties":  true,
+                                                        "properties":  {
+                                                                           "to":  {
+                                                                                      "type":  "string"
+                                                                                  },
+                                                                           "nonce":  {
+                                                                                         "type":  "integer"
+                                                                                     },
+                                                                           "amount_mas":  {
+                                                                                              "type":  "integer"
+                                                                                          },
+                                                                           "applied":  {
+                                                                                           "type":  "boolean"
+                                                                                       },
+                                                                           "expected_fee_mas":  {
+                                                                                                    "type":  "integer"
+                                                                                                },
+                                                                           "height":  {
+                                                                                          "type":  "integer"
+                                                                                      },
+                                                                           "current_nonce":  {
+                                                                                                 "type":  "integer"
+                                                                                             },
+                                                                           "fee_mas":  {
+                                                                                           "type":  "integer"
+                                                                                       },
+                                                                           "receipts_count":  {
+                                                                                                  "type":  "integer"
+                                                                                              },
+                                                                           "fee":  {
+                                                                                       "type":  "integer",
+                                                                                       "description":  "Display unit (mas → micro-THO)"
+                                                                                   },
+                                                                           "reason":  {
+                                                                                          "type":  "string"
+                                                                                      },
+                                                                           "tx_hash":  {
+                                                                                           "type":  "string"
+                                                                                       },
+                                                                           "parsed":  {
+                                                                                          "type":  "boolean"
+                                                                                      },
+                                                                           "merkle_root":  {
+                                                                                               "type":  "string"
+                                                                                           },
+                                                                           "time_utc":  {
+                                                                                            "type":  "integer",
+                                                                                            "description":  "Unix seconds (UTC)"
+                                                                                        },
+                                                                           "expected_nonce":  {
+                                                                                                  "type":  "integer"
+                                                                                              },
+                                                                           "amount":  {
+                                                                                          "type":  "integer",
+                                                                                          "description":  "Display unit (mas → micro-THO)"
+                                                                                      },
+                                                                           "status":  {
+                                                                                          "type":  "string",
+                                                                                          "example":  "queued"
+                                                                                      },
+                                                                           "from":  {
+                                                                                        "type":  "string"
+                                                                                    },
+                                                                           "ok":  {
+                                                                                      "type":  "boolean"
+                                                                                  }
+                                                                       },
+                                                        "type":  "object",
+                                                        "required":  [
+                                                                         "status",
+                                                                         "parsed",
+                                                                         "ok",
+                                                                         "applied"
+                                                                     ]
+                                                    },
+                                       "SignedResponse":  {
+                                                              "additionalProperties":  true,
+                                                              "properties":  {
+                                                                                 "algo":  {
+                                                                                              "type":  "string",
+                                                                                              "description":  "Signing scheme, e.g. \u0027ed25519\u0027"
+                                                                                          },
+                                                                                 "scheme":  {
+                                                                                                "type":  "string",
+                                                                                                "description":  "(compat) may be present instead of \u0027algo\u0027"
+                                                                                            },
+                                                                                 "signature_hex":  {
+                                                                                                       "type":  "string",
+                                                                                                       "description":  "hex-encoded signature"
+                                                                                                   },
+                                                                                 "header":  {
+                                                                                                "$ref":  "#/components/schemas/RoundHeader"
+                                                                                            },
+                                                                                 "pubkey_hex":  {
+                                                                                                    "type":  "string",
+                                                                                                    "description":  "hex-encoded public key"
+                                                                                                }
+                                                                             },
+                                                              "type":  "object",
+                                                              "required":  [
+                                                                               "header",
+                                                                               "pubkey_hex"
+                                                                           ]
+                                                          },
+                                       "RoundHeader":  {
+                                                           "additionalProperties":  true,
+                                                           "properties":  {
+                                                                              "to_height":  {
+                                                                                                "type":  "integer"
+                                                                                            },
+                                                                              "round":  {
+                                                                                            "type":  "integer"
+                                                                                        },
+                                                                              "root":  {
+                                                                                           "type":  "string",
+                                                                                           "description":  "Merkle root (hex)"
+                                                                                       },
+                                                                              "tx_count":  {
+                                                                                               "type":  "integer"
+                                                                                           },
+                                                                              "from_height":  {
+                                                                                                  "type":  "integer"
+                                                                                              },
+                                                                              "time_utc":  {
+                                                                                               "type":  "integer",
+                                                                                               "description":  "Unix seconds (UTC)"
+                                                                                           }
+                                                                          },
+                                                           "type":  "object",
+                                                           "required":  [
+                                                                            "round",
+                                                                            "from_height",
+                                                                            "to_height",
+                                                                            "tx_count",
+                                                                            "root",
+                                                                            "time_utc"
+                                                                        ]
+                                                       },
+                                       "PolicyResponse":  {
+                                                              "additionalProperties":  true,
+                                                              "properties":  {
+                                                                                 "max_msg_commit_len":  {
+                                                                                                            "type":  "integer",
+                                                                                                            "example":  64
+                                                                                                        },
+                                                                                 "allowed_chain_id":  {
+                                                                                                          "type":  "string",
+                                                                                                          "example":  "thomas-dev-1"
+                                                                                                      },
+                                                                                 "expiry_rule":  {
+                                                                                                     "type":  "string"
+                                                                                                 },
+                                                                                 "min_fee_mas":  {
+                                                                                                     "type":  "integer",
+                                                                                                     "example":  1
+                                                                                                 },
+                                                                                 "signing":  {
+                                                                                                 "additionalProperties":  true,
+                                                                                                 "properties":  {
+                                                                                                                    "algo":  {
+                                                                                                                                 "type":  "string",
+                                                                                                                                 "example":  "ed25519"
+                                                                                                                             },
+                                                                                                                    "header_canonical":  {
+                                                                                                                                             "description":  "Canonical header field order",
+                                                                                                                                             "items":  {
+                                                                                                                                                           "type":  "string"
+                                                                                                                                                       },
+                                                                                                                                             "type":  "array"
+                                                                                                                                         },
+                                                                                                                    "pubkey_hex":  {
+                                                                                                                                       "type":  "string",
+                                                                                                                                       "description":  "hex-encoded public key"
+                                                                                                                                   }
+                                                                                                                },
+                                                                                                 "type":  "object",
+                                                                                                 "required":  [
+                                                                                                                  "algo",
+                                                                                                                  "pubkey_hex"
+                                                                                                              ]
+                                                                                             },
+                                                                                 "fee_bps":  {
+                                                                                                 "description":  "Fee in basis points (0.1% = 10)",
+                                                                                                 "example":  10,
+                                                                                                 "type":  "integer"
+                                                                                             },
+                                                                                 "unit":  {
+                                                                                              "type":  "string",
+                                                                                              "example":  "mas"
+                                                                                          }
+                                                                             },
+                                                              "type":  "object",
+                                                              "required":  [
+                                                                               "allowed_chain_id",
+                                                                               "signing"
+                                                                           ]
+                                                          },
+                                       "TxRequest":  {
+                                                         "additionalProperties":  false,
+                                                         "properties":  {
+                                                                            "amount_mas":  {
+                                                                                               "type":  "integer",
+                                                                                               "minimum":  1
+                                                                                           },
+                                                                            "type":  {
+                                                                                         "enum":  1,
+                                                                                         "description":  "Transfer = 1",
+                                                                                         "type":  "integer"
+                                                                                     },
+                                                                            "expiry_height":  {
+                                                                                                  "description":  "0 means no expiry",
+                                                                                                  "type":  "integer",
+                                                                                                  "minimum":  0
+                                                                                              },
+                                                                            "nonce":  {
+                                                                                          "type":  "integer",
+                                                                                          "minimum":  0
+                                                                                      },
+                                                                            "from":  {
+                                                                                         "type":  "string"
+                                                                                     },
+                                                                            "fee_mas":  {
+                                                                                            "description":  "\u003e= max(1, amount_mas*0.1%)",
+                                                                                            "type":  "integer",
+                                                                                            "minimum":  1
+                                                                                        },
+                                                                            "chain_id":  {
+                                                                                             "type":  "string",
+                                                                                             "example":  "thomas-dev-1"
+                                                                                         },
+                                                                            "msg_commitment":  {
+                                                                                                   "type":  "string",
+                                                                                                   "description":  "Optional commitment (hex), \u003c= 64 bytes"
+                                                                                               },
+                                                                            "to":  {
+                                                                                       "type":  "string"
+                                                                                   }
+                                                                        },
+                                                         "type":  "object",
+                                                         "required":  [
+                                                                          "type",
+                                                                          "from",
+                                                                          "to",
+                                                                          "amount_mas",
+                                                                          "fee_mas",
+                                                                          "nonce",
+                                                                          "chain_id"
+                                                                      ]
+                                                     },
+                                       "ErrorResponse":  {
+                                                             "additionalProperties":  true,
+                                                             "properties":  {
+                                                                                "error":  {
+                                                                                              "type":  "string"
+                                                                                          }
+                                                                            },
+                                                             "type":  "object"
+                                                         }
+                                   }
+                   },
+    "openapi":  "3.0.3",
+    "info":  {
+                 "version":  "0.1.0",
+                 "title":  "THO Node API"
+             }
+}
