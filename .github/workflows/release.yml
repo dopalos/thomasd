@@ -32,7 +32,7 @@ jobs:
           } elseif ("${{ github.ref }}" -like "refs/tags/*") {
             $tag = ("${{ github.ref }}" -replace '^refs/tags/','')
           }
-          if (-not $tag) { Write-Error "Could not resolve tag"; exit 1 }
+          if (-not $tag) { Write-Error "Could not resolve tag. Pass 'tag' input when dispatching this workflow."; exit 1 }
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           Write-Host "Resolved tag: $tag"
 
@@ -64,6 +64,8 @@ jobs:
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ steps.resolve_tag.outputs.tag }}
           files: |
