@@ -3,7 +3,13 @@ name: auto-release
 on:
   push:
     tags:
-      - "v*"
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.8)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -19,14 +25,12 @@ jobs:
       - name: Create GitHub Release (auto notes)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          # 릴리스 노트 자동 생성
+          # 수동 실행이면 inputs.tag, 아니면 ref_name 사용
+          tag_name: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
+          name:     ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
           generate_release_notes: true
           draft: false
-          # rc/beta/alpha 태그는 pre-release로 표시
-          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
-          # 최신 릴리스로 표시
+          prerelease: ${{ contains(inputs.tag != '' && inputs.tag || github.ref_name, '-rc') || contains(inputs.tag != '' && inputs.tag || github.ref_name, '-beta') || contains(inputs.tag != '' && inputs.tag || github.ref_name, '-alpha') }}
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
