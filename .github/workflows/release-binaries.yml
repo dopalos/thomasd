@@ -1,0 +1,164 @@
+﻿name: release-binaries
+
+on:
+  push:
+    tags: ["v*"]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build & upload (e.g. v0.1.12)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-binaries-${{ github.run_id }}
+  cancel-in-progress: false
+
+env:
+  BUILD_DIR: "."          # 메인 패키지 경로(루트가 main이면 ".")
+  BIN_NAME: "thomasd"
+  GO_VERSION: "1.25.x"
+
+jobs:
+  prep:
+    name: Resolve tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG=""
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ inputs.tag }}"
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          if [[ -z "$TAG" ]]; then
+            echo "Could not resolve tag. Pass 'tag' input or run on tag push/release." >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag: $TAG"
+
+  build:
+    name: Build & package
+    needs: prep
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux   # tar.gz
+            goarch: amd64
+            archive: tar.gz
+            exe_ext: ""
+          - goos: linux
+            goarch: arm64
+            archive: tar.gz
+            exe_ext: ""
+          - goos: windows # zip
+            goarch: amd64
+            archive: zip
+            exe_ext: ".exe"
+          - goos: windows
+            goarch: arm64
+            archive: zip
+            exe_ext: ".exe"
+          - goos: darwin  # tar.gz
+            goarch: amd64
+            archive: tar.gz
+            exe_ext: ""
+          - goos: darwin
+            goarch: arm64
+            archive: tar.gz
+            exe_ext: ""
+    env:
+      TAG: ${{ needs.prep.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          fetch-tags: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+        shell: bash
+        env:
+          GOOS:  ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/bin
+          OUT="dist/bin/${{ env.BIN_NAME }}${{ matrix.exe_ext }}"
+          go build -trimpath -ldflags "-s -w" -o "${OUT}" "${{ env.BUILD_DIR }}"
+          if [[ "${{ matrix.exe_ext }}" == "" ]]; then chmod +x "${OUT}"; fi
+
+      - name: Package (${{ matrix.archive }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="${{ env.BIN_NAME }}_${{ env.TAG }}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          mkdir -p "dist/release/${NAME}"
+          mv "dist/bin/${{ env.BIN_NAME }}${{ matrix.exe_ext }}" "dist/release/${NAME}/"
+          pushd dist/release >/dev/null
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            zip -r "${NAME}.zip" "${NAME}"
+          else
+            tar -czf "${NAME}.tar.gz" "${NAME}"
+          fi
+          rm -rf "${NAME}"
+          popd >/dev/null
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pkg-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/release/*.tar.gz
+            dist/release/*.zip
+          if-no-files-found: error
+          retention-days: 5
+
+  release:
+    name: Create/Update GitHub Release
+    needs: [prep, build]
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.prep.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/release
+
+      - name: Generate SHA256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          pushd dist/release >/dev/null
+          find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) -printf "%f\n" | sort | xargs -I{} sha256sum "{}" > "checksums_${TAG}.txt"
+          popd >/dev/null
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          files: |
+            dist/release/**/*.tar.gz
+            dist/release/**/*.zip
+            dist/release/**/checksums_*.txt
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
