@@ -3,34 +3,47 @@ name: auto-release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release (e.g. v0.1.8)'
-        required: true
-        type: string
+        description: "Tag to create release for (e.g. v0.1.10)"
+        required: false
 
 permissions:
   contents: write
 
 concurrency:
-  group: auto-release-${{ github.ref }}
+  group: auto-release-${{ github.ref || inputs.tag || github.run_id }}
   cancel-in-progress: false
 
 jobs:
   create-release:
     runs-on: ubuntu-latest
     steps:
+      - name: Determine tag
+        id: t
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG=""
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          elif [[ -n "${{ inputs.tag }}" ]]; then
+            TAG="${{ inputs.tag }}"
+          fi
+          [[ -n "$TAG" ]] || { echo "No tag found"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag: $TAG"
+
       - name: Create GitHub Release (auto notes)
         uses: softprops/action-gh-release@v2
         with:
-          # 수동 실행이면 inputs.tag, 아니면 ref_name 사용
-          tag_name: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
-          name:     ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
+          tag_name: ${{ steps.t.outputs.tag }}
+          name:     ${{ steps.t.outputs.tag }}
           generate_release_notes: true
           draft: false
-          prerelease: ${{ contains(inputs.tag != '' && inputs.tag || github.ref_name, '-rc') || contains(inputs.tag != '' && inputs.tag || github.ref_name, '-beta') || contains(inputs.tag != '' && inputs.tag || github.ref_name, '-alpha') }}
+          prerelease: ${{ contains(steps.t.outputs.tag, '-rc') || contains(steps.t.outputs.tag, '-beta') || contains(steps.t.outputs.tag, '-alpha') }}
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

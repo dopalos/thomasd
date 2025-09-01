@@ -1,0 +1,76 @@
+name: release-assets
+
+on:
+  release:
+    types: [published]     # auto-release가 만든 릴리스에 자동 반응
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to attach assets (e.g. v0.1.10)"
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-assets-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-upload:
+    runs-on: windows-2022
+    steps:
+      - name: Resolve tag
+        id: tag
+        shell: pwsh
+        run: |
+          $tag = ""
+          if ("${{ github.event_name }}" -eq "release") {
+            $tag = "${{ github.event.release.tag_name }}"
+          } elseif ("${{ github.ref_type }}" -eq "tag") {
+            $tag = "${{ github.ref_name }}"
+          } elseif ("${{ inputs.tag }}") {
+            $tag = "${{ inputs.tag }}"
+          }
+          if (-not $tag) { throw "Could not resolve tag" }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Resolved tag: $tag"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.25.x
+          cache: true
+
+      - name: Merge OpenAPI fragments
+        shell: pwsh
+        run: |
+          .\tools\openapi\merge_openapi.ps1
+          if (!(Test-Path .\server\static\openapi\merged.json)) { throw "merged.json not generated" }
+          Get-Item .\server\static\openapi\merged.json | Format-List *
+
+      - name: Generate Postman collection
+        shell: pwsh
+        run: |
+          .\tools\openapi\write-postman.ps1 `
+            -Merged .\server\static\openapi\merged.json `
+            -Out .\dist\thomasd-postman.json `
+            -BaseForVar "http://127.0.0.1:62533"
+          if (!(Test-Path .\dist\thomasd-postman.json)) { throw "Postman collection not generated" }
+          Get-Item .\dist\thomasd-postman.json | Format-List *
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: |
+            server/static/openapi/merged.json
+            dist/thomasd-postman.json
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
