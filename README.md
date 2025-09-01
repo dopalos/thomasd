@@ -1,69 +1,41 @@
-﻿# THO Node (thomasd)
+﻿# thomasd
 
-- **Docs(UI)**: `/docs` — `THOMAS_ENABLE_DOCS=1`일 때만 노출
-- **OpenAPI**: `/openapi.json` (코어), `/openapi/merged.json` (조각 병합판)
-- **Metrics**: `/metrics` — `THOMAS_ENABLE_METRICS=1`일 때만 노출
-- **Signed headers**: `/round/latest/signed`, `/round/{round}/signed`
-- **Tx submit**: `/tx`
-- **Health/Policy**: `/health`, `/policy`
+경량 합의/서명 데모 노드. Windows PowerShell 기준으로 설명합니다.
 
----
-
-## 1) 빠른 시작
+## TL;DR (5분 셋업)
 
 ```powershell
-# 빌드
-cd C:\thomas-scaffold\thomasd
-go build -o .\bin\thomasd.exe .\cmd\thomasd
-
-# (개발용) 문서/메트릭 노출
-$env:THOMAS_ENABLE_DOCS    = "1"
-$env:THOMAS_ENABLE_METRICS = "1"
-
-# 실행
-Start-Process -FilePath .\bin\thomasd.exe -WorkingDirectory . -WindowStyle Hidden
-Start-Sleep 1
-
-# BASE 탐색
-$pid  = (Get-Process thomasd | Select-Object -First 1).Id
-$port = (Get-NetTCPConnection -State Listen | ? OwningProcess -eq $pid | Select -First 1 -Expand LocalPort)
-$BASE = "http://127.0.0.1:$port"
-"BASE = $BASE"
-
-## 운영 체크리스트
-- 문서 노출: THOMAS_ENABLE_DOCS=1 일 때만 /docs, /openapi/* 노출
-- 메트릭 노출: THOMAS_ENABLE_METRICS=1 일 때 /metrics 노출
-- 프록시: tools\signedmsg_proxy\run-proxy-task.ps1 를 시작프로그램에 등록(install-proxy-startup.ps1)
-
-## 빠른 점검
-$BASE=(Select-String -Path .\run_logs\out_*.txt -Pattern 'listening on (http://[0-9\.]+:\d+)'|Select-Object -Last 1).Matches[0].Groups[1].Value.Trim()
-(Invoke-RestMethod "$BASE/health").status
-(Invoke-RestMethod "$BASE/openapi/merged.json").openapi
-curl.exe -sI "$BASE/docs/" | findstr /C:"200"
-(Invoke-RestMethod "$BASE/metrics") -as [string] | findstr thomas_health_ok
-
-
-# thomasd — docs & metrics quickstart
-
-## Quick start
-```powershell
-# 실행 (문서/메트릭 노출)
+# 0) 문서/메트릭 노출 (옵션)
 $env:THOMAS_ENABLE_DOCS="1"
 $env:THOMAS_ENABLE_METRICS="1"
+
+# 1) thomasd 실행 (포그라운드)
 .\bin\thomasd.exe
+# 로그에 listening 주소가 뜸: e.g. http://127.0.0.1:62533
 
+# 2) BASE 자동 탐색(다른 콘솔에서)
+$p = Get-Process thomasd -ErrorAction Stop
+$c = Get-NetTCPConnection -State Listen | ? OwningProcess -eq $p.Id | Select -First 1
+$addr = if($c.LocalAddress -eq '::1'){'[::1]'} else {'127.0.0.1'}
+$BASE = "http://{0}:{1}" -f $addr,$c.LocalPort
+"BASE = $BASE"
 
-## Release (자동 자산 첨부)
-GitHub Release를 만들면 워크플로가 아래 파일을 자동으로 첨부합니다:
-- `server/static/openapi/merged.json`
-- `dist/thomasd-postman.json`
-
-필요 시 수동 실행:
-```powershell
-# 병합
+# 3) OpenAPI 병합 + Swagger 확인
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\openapi\merge_openapi.ps1
-# Postman
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\openapi\write-postman.ps1 `
-  -Merged .\server\static\openapi\merged.json `
-  -Out .\dist\thomasd-postman.json `
-  -BaseForVar "$BASE"
+(Invoke-RestMethod "$BASE/openapi/merged.json").openapi
+curl.exe -sI "$BASE/docs/" | findstr /C:"200"
+
+# 4) 프록시 기동(서명 메시지 호환 레이어)
+Get-Process signedmsg-proxy -ErrorAction SilentlyContinue | Stop-Process -Force
+.\tools\signedmsg_proxy\signedmsg-proxy.exe -listen :63081 -base $BASE
+curl.exe -sI "http://127.0.0.1:63081/round/latest/signed_msg" | findstr /C:"200"
+(Invoke-RestMethod "http://127.0.0.1:63081/round/latest/signed_msg").signature_valid
+
+## API Assets
+- OpenAPI (merged): [merged.json](https://github.com/dopalos/thomasd/releases/latest/download/merged.json)
+- Postman Collection: [thomasd-postman.json](https://github.com/dopalos/thomasd/releases/latest/download/thomasd-postman.json)
+
+### Postman 사용법
+1) 위 컬렉션(JSON) 다운로드 → Postman `Import`.
+2) `baseUrl` 변수를 원하는 엔드포인트로 설정 (기본값: `http://127.0.0.1:62533`).
+3) 필요한 경우 `Authorization` 전역 변수를 환경에 추가.
