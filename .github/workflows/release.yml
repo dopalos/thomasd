@@ -6,26 +6,30 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to upload assets to (e.g., v0.1.6)'
+        description: "Tag to upload assets to"
         required: true
-
-permissions:
-  contents: write
 
 jobs:
   build-and-upload:
     runs-on: windows-2022
-    env:
-      TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
           go-version: 1.25.x
           cache: true
+
+      # 🔧 여기가 핵심: 이벤트에 따라 태그 결정을 출력으로 전달
+      - name: Resolve tag
+        id: prep
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "release") {
+            "tag=${{ github.event.release.tag_name }}" >> $env:GITHUB_OUTPUT
+          } else {
+            "tag=${{ inputs.tag }}" >> $env:GITHUB_OUTPUT
+          }
+          "Resolved tag: ${{ steps.prep.outputs.tag }}"
 
       - name: Merge OpenAPI fragments
         shell: pwsh
@@ -46,13 +50,10 @@ jobs:
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          # release 이벤트면 해당 릴리스 태그로, 수동 dispatch면 입력값(tag)으로
-          tag_name: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+          tag_name: ${{ steps.prep.outputs.tag }}
           files: |
             server/static/openapi/merged.json
             dist/thomasd-postman.json
           fail_on_unmatched_files: true
-          allow_updates: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
