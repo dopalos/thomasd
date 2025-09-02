@@ -13,6 +13,23 @@ env:
   GO_VERSION: 1.25.x
 
 jobs:
+
+  release:
+    name: Create/Update GitHub Release
+    needs: [resolve-tag, build]
+    runs-on: ubuntu-latest
++   permissions:
++     contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve-tag.outputs.tag }}
+          files: |
+            **/*.tar.gz
+            **/*.zip
++         token: ${{ secrets.GITHUB_TOKEN }}
+
   resolve-tag:
     name: Resolve tag
     runs-on: ubuntu-latest
