@@ -1,0 +1,521 @@
+{
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "components": {
+    "schemas": {
+      "SignedResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "header",
+          "pubkey_hex"
+        ],
+        "properties": {
+          "pubkey_hex": {
+            "type": "string",
+            "description": "hex-encoded public key"
+          },
+          "algo": {
+            "type": "string",
+            "description": "Signing scheme, e.g. 'ed25519'"
+          },
+          "header": {
+            "$ref": "#/components/schemas/RoundHeader"
+          },
+          "signature_hex": {
+            "type": "string",
+            "description": "hex-encoded signature"
+          },
+          "scheme": {
+            "type": "string",
+            "description": "(compat) may be present instead of 'algo'"
+          }
+        }
+      },
+      "RoundHeader": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "round",
+          "from_height",
+          "to_height",
+          "tx_count",
+          "root",
+          "time_utc"
+        ],
+        "properties": {
+          "root": {
+            "type": "string",
+            "description": "Merkle root (hex)"
+          },
+          "round": {
+            "type": "integer"
+          },
+          "from_height": {
+            "type": "integer"
+          },
+          "to_height": {
+            "type": "integer"
+          },
+          "time_utc": {
+            "type": "integer",
+            "description": "Unix seconds (UTC)"
+          },
+          "tx_count": {
+            "type": "integer"
+          }
+        }
+      },
+      "TxRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "from",
+          "to",
+          "amount_mas",
+          "fee_mas",
+          "nonce",
+          "chain_id"
+        ],
+        "properties": {
+          "expiry_height": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "0 means no expiry"
+          },
+          "to": {
+            "type": "string"
+          },
+          "from": {
+            "type": "string"
+          },
+          "fee_mas": {
+            "type": "integer",
+            "minimum": 1,
+            "description": ">= max(1, amount_mas*0.1%)"
+          },
+          "amount_mas": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "type": {
+            "type": "integer",
+            "description": "Transfer = 1",
+            "enum": 1
+          },
+          "msg_commitment": {
+            "type": "string",
+            "description": "Optional commitment (hex), <= 64 bytes"
+          },
+          "chain_id": {
+            "type": "string",
+            "example": "thomas-dev-1"
+          },
+          "nonce": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "PolicyResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "allowed_chain_id",
+          "signing"
+        ],
+        "properties": {
+          "unit": {
+            "type": "string",
+            "example": "mas"
+          },
+          "max_msg_commit_len": {
+            "type": "integer",
+            "example": 64
+          },
+          "allowed_chain_id": {
+            "type": "string",
+            "example": "thomas-dev-1"
+          },
+          "fee_bps": {
+            "type": "integer",
+            "description": "Fee in basis points (0.1% = 10)",
+            "example": 10
+          },
+          "expiry_rule": {
+            "type": "string"
+          },
+          "signing": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": [
+              "algo",
+              "pubkey_hex"
+            ],
+            "properties": {
+              "pubkey_hex": {
+                "type": "string",
+                "description": "hex-encoded public key"
+              },
+              "header_canonical": {
+                "items": {
+                  "type": "string"
+                },
+                "description": "Canonical header field order",
+                "type": "array"
+              },
+              "algo": {
+                "type": "string",
+                "example": "ed25519"
+              }
+            }
+          },
+          "min_fee_mas": {
+            "type": "integer",
+            "example": 1
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "TxStatus": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "status",
+          "parsed",
+          "ok",
+          "applied"
+        ],
+        "properties": {
+          "tx_hash": {
+            "type": "string"
+          },
+          "nonce": {
+            "type": "integer"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "expected_nonce": {
+            "type": "integer"
+          },
+          "time_utc": {
+            "type": "integer",
+            "description": "Unix seconds (UTC)"
+          },
+          "parsed": {
+            "type": "boolean"
+          },
+          "applied": {
+            "type": "boolean"
+          },
+          "merkle_root": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer",
+            "description": "Display unit (mas → micro-THO)"
+          },
+          "expected_fee_mas": {
+            "type": "integer"
+          },
+          "fee": {
+            "type": "integer",
+            "description": "Display unit (mas → micro-THO)"
+          },
+          "status": {
+            "type": "string",
+            "example": "queued"
+          },
+          "amount_mas": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          },
+          "receipts_count": {
+            "type": "integer"
+          },
+          "to": {
+            "type": "string"
+          },
+          "fee_mas": {
+            "type": "integer"
+          },
+          "from": {
+            "type": "string"
+          },
+          "current_nonce": {
+            "type": "integer"
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/tx": {
+      "post": {
+        "operationId": "postTx",
+        "tags": "tx",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/cbor": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "application/json": {
+              "examples": {
+                "ok": {
+                  "value": {
+                    "expiry_height": 0,
+                    "to": "tho1bob",
+                    "from": "tho1alice",
+                    "fee_mas": 100,
+                    "amount_mas": 100000,
+                    "type": 1,
+                    "msg_commitment": "d20bece125baf11c1f7c0dfff8b20ca575941cb86f2fc521068b2653a75cd3c4",
+                    "chain_id": "thomas-dev-1",
+                    "nonce": 4935
+                  }
+                }
+              },
+              "schema": {
+                "$ref": "#/components/schemas/TxRequest"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": "skipapply"
+            },
+            "name": "debug",
+            "description": "Reserved. For legacy /tx_old only; current /tx ignores this.",
+            "required": false
+          },
+          {
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            },
+            "name": "debuglog",
+            "description": "Emit verbose logs (if supported). No-op otherwise.",
+            "required": false
+          }
+        ],
+        "summary": "Submit a transfer",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "bad_nonce": {
+                    "value": {
+                      "tx_hash": "c8a9...7de00",
+                      "nonce": 4935,
+                      "reason": "apply:bad_nonce",
+                      "ok": true,
+                      "expected_nonce": 4941,
+                      "time_utc": 1756620735,
+                      "parsed": true,
+                      "applied": false,
+                      "merkle_root": "6e6c9c0f...ae51c08",
+                      "amount": 10000,
+                      "expected_fee_mas": 100,
+                      "fee": 10,
+                      "status": "queued",
+                      "amount_mas": 100000,
+                      "height": 18207,
+                      "receipts_count": 16843,
+                      "to": "tho1bob",
+                      "fee_mas": 100,
+                      "from": "tho1alice",
+                      "current_nonce": 4940
+                    }
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/TxStatus"
+                }
+              }
+            },
+            "description": "Accepted / queued with status"
+          }
+        }
+      }
+    },
+    "/round/latest/signed": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "example": {
+                    "value": {
+                      "pubkey_hex": "4f0c...abcd",
+                      "algo": "ed25519",
+                      "header": {
+                        "root": "e0f26435ae89...29f8621",
+                        "round": 5,
+                        "from_height": 18193,
+                        "to_height": 18212,
+                        "time_utc": 1756640561,
+                        "tx_count": 16846
+                      },
+                      "signature_hex": "9a1b...ff00"
+                    }
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/SignedResponse"
+                }
+              }
+            },
+            "description": "Signed latest round"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "No round"
+          }
+        },
+        "operationId": "getLatestSignedRound",
+        "tags": "rounds",
+        "summary": "Get latest round with signature"
+      }
+    },
+    "/round/{round}/signed": {
+      "get": {
+        "responses": {
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad round id"
+          },
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignedResponse"
+                }
+              }
+            },
+            "description": "Signed round"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found"
+          }
+        },
+        "parameters": {
+          "in": "path",
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "name": "round",
+          "required": true
+        },
+        "operationId": "getSignedRound",
+        "tags": "rounds",
+        "summary": "Get round N with signature"
+      }
+    },
+    "/policy": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "examples": {
+                  "plain": {
+                    "value": "thomas-dev-1"
+                  }
+                },
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "examples": {
+                  "dev": {
+                    "value": {
+                      "unit": "mas",
+                      "max_msg_commit_len": 64,
+                      "allowed_chain_id": "thomas-dev-1",
+                      "fee_bps": 10,
+                      "expiry_rule": "valid if expiry_height==0 OR current_height < expiry_height",
+                      "signing": {
+                        "pubkey_hex": "4f0c...abcd",
+                        "header_canonical": [
+                          "round",
+                          "from_height",
+                          "to_height",
+                          "tx_count",
+                          "root",
+                          "time_utc"
+                        ],
+                        "algo": "ed25519"
+                      },
+                      "min_fee_mas": 1
+                    }
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyResponse"
+                }
+              }
+            },
+            "description": "Policy / chain metadata"
+          }
+        },
+        "operationId": "getPolicy",
+        "tags": "policy",
+        "summary": "Get node policy / chain rules"
+      }
+    }
+  },
+  "info": {
+    "title": "THO Node API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.0.3"
+}

@@ -1,0 +1,521 @@
+{
+  "info": {
+    "title": "THO Node API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/policy": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "examples": {
+                  "plain": {
+                    "value": "thomas-dev-1"
+                  }
+                },
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "examples": {
+                  "dev": {
+                    "value": {
+                      "fee_bps": 10,
+                      "signing": {
+                        "pubkey_hex": "4f0c...abcd",
+                        "algo": "ed25519",
+                        "header_canonical": [
+                          "round",
+                          "from_height",
+                          "to_height",
+                          "tx_count",
+                          "root",
+                          "time_utc"
+                        ]
+                      },
+                      "expiry_rule": "valid if expiry_height==0 OR current_height < expiry_height",
+                      "max_msg_commit_len": 64,
+                      "unit": "mas",
+                      "min_fee_mas": 1,
+                      "allowed_chain_id": "thomas-dev-1"
+                    }
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyResponse"
+                }
+              }
+            },
+            "description": "Policy / chain metadata"
+          }
+        },
+        "operationId": "getPolicy",
+        "summary": "Get node policy / chain rules",
+        "tags": "policy"
+      }
+    },
+    "/tx": {
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/cbor": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "application/json": {
+              "examples": {
+                "ok": {
+                  "value": {
+                    "chain_id": "thomas-dev-1",
+                    "expiry_height": 0,
+                    "from": "tho1alice",
+                    "amount_mas": 100000,
+                    "fee_mas": 100,
+                    "type": 1,
+                    "to": "tho1bob",
+                    "msg_commitment": "d20bece125baf11c1f7c0dfff8b20ca575941cb86f2fc521068b2653a75cd3c4",
+                    "nonce": 4935
+                  }
+                }
+              },
+              "schema": {
+                "$ref": "#/components/schemas/TxRequest"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "description": "Reserved. For legacy /tx_old only; current /tx ignores this.",
+            "required": false,
+            "name": "debug",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": "skipapply"
+            }
+          },
+          {
+            "description": "Emit verbose logs (if supported). No-op otherwise.",
+            "required": false,
+            "name": "debuglog",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "summary": "Submit a transfer",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "bad_nonce": {
+                    "value": {
+                      "current_nonce": 4940,
+                      "status": "queued",
+                      "parsed": true,
+                      "expected_fee_mas": 100,
+                      "time_utc": 1756620735,
+                      "tx_hash": "c8a9...7de00",
+                      "nonce": 4935,
+                      "height": 18207,
+                      "applied": false,
+                      "merkle_root": "6e6c9c0f...ae51c08",
+                      "reason": "apply:bad_nonce",
+                      "fee": 10,
+                      "receipts_count": 16843,
+                      "to": "tho1bob",
+                      "expected_nonce": 4941,
+                      "amount": 10000,
+                      "ok": true,
+                      "amount_mas": 100000,
+                      "fee_mas": 100,
+                      "from": "tho1alice"
+                    }
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/TxStatus"
+                }
+              }
+            },
+            "description": "Accepted / queued with status"
+          }
+        },
+        "operationId": "postTx",
+        "tags": "tx"
+      }
+    },
+    "/round/latest/signed": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "example": {
+                    "value": {
+                      "pubkey_hex": "4f0c...abcd",
+                      "algo": "ed25519",
+                      "header": {
+                        "round": 5,
+                        "to_height": 18212,
+                        "root": "e0f26435ae89...29f8621",
+                        "time_utc": 1756640561,
+                        "tx_count": 16846,
+                        "from_height": 18193
+                      },
+                      "signature_hex": "9a1b...ff00"
+                    }
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/SignedResponse"
+                }
+              }
+            },
+            "description": "Signed latest round"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "No round"
+          }
+        },
+        "operationId": "getLatestSignedRound",
+        "summary": "Get latest round with signature",
+        "tags": "rounds"
+      }
+    },
+    "/round/{round}/signed": {
+      "get": {
+        "responses": {
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad round id"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not found"
+          },
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignedResponse"
+                }
+              }
+            },
+            "description": "Signed round"
+          }
+        },
+        "parameters": {
+          "required": true,
+          "name": "round",
+          "in": "path",
+          "schema": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "operationId": "getSignedRound",
+        "summary": "Get round N with signature",
+        "tags": "rounds"
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "components": {
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "TxStatus": {
+        "type": "object",
+        "properties": {
+          "current_nonce": {
+            "type": "integer"
+          },
+          "status": {
+            "example": "queued",
+            "type": "string"
+          },
+          "parsed": {
+            "type": "boolean"
+          },
+          "expected_fee_mas": {
+            "type": "integer"
+          },
+          "time_utc": {
+            "description": "Unix seconds (UTC)",
+            "type": "integer"
+          },
+          "tx_hash": {
+            "type": "string"
+          },
+          "nonce": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          },
+          "applied": {
+            "type": "boolean"
+          },
+          "merkle_root": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "fee": {
+            "description": "Display unit (mas → micro-THO)",
+            "type": "integer"
+          },
+          "receipts_count": {
+            "type": "integer"
+          },
+          "to": {
+            "type": "string"
+          },
+          "expected_nonce": {
+            "type": "integer"
+          },
+          "amount": {
+            "description": "Display unit (mas → micro-THO)",
+            "type": "integer"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "amount_mas": {
+            "type": "integer"
+          },
+          "fee_mas": {
+            "type": "integer"
+          },
+          "from": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "parsed",
+          "ok",
+          "applied"
+        ],
+        "additionalProperties": true
+      },
+      "RoundHeader": {
+        "type": "object",
+        "properties": {
+          "round": {
+            "type": "integer"
+          },
+          "to_height": {
+            "type": "integer"
+          },
+          "root": {
+            "description": "Merkle root (hex)",
+            "type": "string"
+          },
+          "time_utc": {
+            "description": "Unix seconds (UTC)",
+            "type": "integer"
+          },
+          "tx_count": {
+            "type": "integer"
+          },
+          "from_height": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "round",
+          "from_height",
+          "to_height",
+          "tx_count",
+          "root",
+          "time_utc"
+        ],
+        "additionalProperties": true
+      },
+      "SignedResponse": {
+        "type": "object",
+        "properties": {
+          "pubkey_hex": {
+            "description": "hex-encoded public key",
+            "type": "string"
+          },
+          "scheme": {
+            "description": "(compat) may be present instead of 'algo'",
+            "type": "string"
+          },
+          "algo": {
+            "description": "Signing scheme, e.g. 'ed25519'",
+            "type": "string"
+          },
+          "header": {
+            "$ref": "#/components/schemas/RoundHeader"
+          },
+          "signature_hex": {
+            "description": "hex-encoded signature",
+            "type": "string"
+          }
+        },
+        "required": [
+          "header",
+          "pubkey_hex"
+        ],
+        "additionalProperties": true
+      },
+      "TxRequest": {
+        "type": "object",
+        "properties": {
+          "chain_id": {
+            "example": "thomas-dev-1",
+            "type": "string"
+          },
+          "expiry_height": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "0 means no expiry"
+          },
+          "from": {
+            "type": "string"
+          },
+          "amount_mas": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "fee_mas": {
+            "type": "integer",
+            "minimum": 1,
+            "description": ">= max(1, amount_mas*0.1%)"
+          },
+          "type": {
+            "type": "integer",
+            "description": "Transfer = 1",
+            "enum": 1
+          },
+          "to": {
+            "type": "string"
+          },
+          "msg_commitment": {
+            "description": "Optional commitment (hex), <= 64 bytes",
+            "type": "string"
+          },
+          "nonce": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "type",
+          "from",
+          "to",
+          "amount_mas",
+          "fee_mas",
+          "nonce",
+          "chain_id"
+        ],
+        "additionalProperties": false
+      },
+      "PolicyResponse": {
+        "type": "object",
+        "properties": {
+          "fee_bps": {
+            "type": "integer",
+            "example": 10,
+            "description": "Fee in basis points (0.1% = 10)"
+          },
+          "signing": {
+            "type": "object",
+            "properties": {
+              "pubkey_hex": {
+                "description": "hex-encoded public key",
+                "type": "string"
+              },
+              "algo": {
+                "example": "ed25519",
+                "type": "string"
+              },
+              "header_canonical": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Canonical header field order"
+              }
+            },
+            "required": [
+              "algo",
+              "pubkey_hex"
+            ],
+            "additionalProperties": true
+          },
+          "expiry_rule": {
+            "type": "string"
+          },
+          "max_msg_commit_len": {
+            "example": 64,
+            "type": "integer"
+          },
+          "unit": {
+            "example": "mas",
+            "type": "string"
+          },
+          "min_fee_mas": {
+            "example": 1,
+            "type": "integer"
+          },
+          "allowed_chain_id": {
+            "example": "thomas-dev-1",
+            "type": "string"
+          }
+        },
+        "required": [
+          "allowed_chain_id",
+          "signing"
+        ],
+        "additionalProperties": true
+      }
+    }
+  }
+}

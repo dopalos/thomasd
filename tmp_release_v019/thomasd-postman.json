@@ -1,0 +1,115 @@
+{
+  "info": {
+    "name": "thomasd API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "GET /policy",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Content-Type",
+            "disabled": false,
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "host": [
+            "{{base}}"
+          ],
+          "path": [
+            "policy"
+          ],
+          "raw": "{{base}}/policy"
+        }
+      }
+    },
+    {
+      "name": "POST /tx",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "disabled": false,
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "host": [
+            "{{base}}"
+          ],
+          "path": [
+            "tx"
+          ],
+          "raw": "{{base}}/tx"
+        },
+        "body": {
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          },
+          "mode": "raw",
+          "raw": "{\r\n  \"to\": \"tho1bob\",\r\n  \"fee_mas\": 100,\r\n  \"type\": 1,\r\n  \"from\": \"tho1alice\",\r\n  \"nonce\": 4935,\r\n  \"amount_mas\": 100000,\r\n  \"chain_id\": \"thomas-dev-1\",\r\n  \"expiry_height\": 0\r\n}"
+        }
+      }
+    },
+    {
+      "name": "GET /round/latest/signed",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Content-Type",
+            "disabled": false,
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "host": [
+            "{{base}}"
+          ],
+          "path": [
+            "round",
+            "latest",
+            "signed"
+          ],
+          "raw": "{{base}}/round/latest/signed"
+        }
+      }
+    },
+    {
+      "name": "GET /round/{round}/signed",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Content-Type",
+            "disabled": false,
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "host": [
+            "{{base}}"
+          ],
+          "path": [
+            "round",
+            "{round}",
+            "signed"
+          ],
+          "raw": "{{base}}/round/{round}/signed"
+        }
+      }
+    }
+  ],
+  "variable": [
+    {
+      "value": "http://127.0.0.1:62533",
+      "key": "base"
+    }
+  ]
+}

@@ -1,3 +1,14 @@
-* text=auto
-*.go  text eol=lf
-*.yml text eol=lf
+# 기본은 LF
+* text=auto eol=lf
+
+# 윈도우 스크립트만 CRLF 유지
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 코드/데이터는 LF 고정
+*.go   text eol=lf
+*.sh   text eol=lf
+*.json text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf

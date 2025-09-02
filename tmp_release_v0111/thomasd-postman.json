@@ -1,0 +1,115 @@
+{
+  "info": {
+    "name": "thomasd API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "POST /tx",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "value": "application/json",
+            "disabled": false,
+            "key": "Content-Type"
+          }
+        ],
+        "url": {
+          "path": [
+            "tx"
+          ],
+          "host": [
+            "{{base}}"
+          ],
+          "raw": "{{base}}/tx"
+        },
+        "body": {
+          "raw": "{\r\n  \"type\": 1,\r\n  \"amount_mas\": 100000,\r\n  \"fee_mas\": 100,\r\n  \"expiry_height\": 0,\r\n  \"nonce\": 4935,\r\n  \"chain_id\": \"thomas-dev-1\",\r\n  \"to\": \"tho1bob\",\r\n  \"from\": \"tho1alice\"\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          },
+          "mode": "raw"
+        }
+      }
+    },
+    {
+      "name": "GET /round/latest/signed",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "value": "application/json",
+            "disabled": false,
+            "key": "Content-Type"
+          }
+        ],
+        "url": {
+          "path": [
+            "round",
+            "latest",
+            "signed"
+          ],
+          "host": [
+            "{{base}}"
+          ],
+          "raw": "{{base}}/round/latest/signed"
+        }
+      }
+    },
+    {
+      "name": "GET /round/{round}/signed",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "value": "application/json",
+            "disabled": false,
+            "key": "Content-Type"
+          }
+        ],
+        "url": {
+          "path": [
+            "round",
+            "{round}",
+            "signed"
+          ],
+          "host": [
+            "{{base}}"
+          ],
+          "raw": "{{base}}/round/{round}/signed"
+        }
+      }
+    },
+    {
+      "name": "GET /policy",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "value": "application/json",
+            "disabled": false,
+            "key": "Content-Type"
+          }
+        ],
+        "url": {
+          "path": [
+            "policy"
+          ],
+          "host": [
+            "{{base}}"
+          ],
+          "raw": "{{base}}/policy"
+        }
+      }
+    }
+  ],
+  "variable": [
+    {
+      "value": "http://127.0.0.1:62533",
+      "key": "base"
+    }
+  ]
+}

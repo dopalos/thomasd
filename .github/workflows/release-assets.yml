@@ -6,33 +6,35 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to attach assets (e.g. v0.1.10)"
-        required: false
+        description: "Tag to attach assets to (e.g. v0.1.11)"
+        required: true
 
 permissions:
   contents: write
 
+# 런 제목에 태그가 보이도록
+run-name: "release-assets → ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}"
+
 concurrency:
-  # 태그별로 동시성 분리
-  group: release-assets-${{ github.event_name == 'release' && github.event.release.tag_name || (inputs.tag != '' && inputs.tag) || github.ref }}
+  # 태그별로 격리하고 싶으면 run_id 사용(중첩 취소 방지)
+  group: release-assets-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
   build-and-upload:
     runs-on: windows-2022
-
     steps:
       - name: Resolve tag
-        id: tag
+        id: r
         shell: pwsh
         run: |
           $tag = ""
           if ("${{ github.event_name }}" -eq "release") {
             $tag = "${{ github.event.release.tag_name }}"
-          } elseif ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.tag }}" -ne "") {
+          } elseif ("${{ github.event_name }}" -eq "workflow_dispatch") {
             $tag = "${{ inputs.tag }}"
           } elseif ("${{ github.ref }}" -like "refs/tags/*") {
-            $tag = ("${{ github.ref }}" -replace '^refs/tags/','')
+            $tag = "${{ github.ref_name }}"
           }
           if ([string]::IsNullOrWhiteSpace($tag)) { throw "Could not resolve tag. Pass 'tag' input." }
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
@@ -65,7 +67,7 @@ jobs:
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
+          tag_name: ${{ steps.r.outputs.tag }}
           files: |
             server/static/openapi/merged.json
             dist/thomasd-postman.json
