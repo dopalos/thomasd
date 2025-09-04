@@ -206,13 +206,15 @@ jobs:
     name: Create/Update GitHub Release (binaries + checksums)
     needs: [resolve-tag, make-checksums, sign-and-sbom]
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.resolve-tag.outputs.tag }}
     permissions:
       contents: write
     steps:
       - name: Download archives (merge)
         uses: actions/download-artifact@v4
         with:
-          pattern: '${{ env.BIN_NAME }}_${{ needs.resolve-tag.outputs.tag }}_*'
+          pattern: '${{ env.BIN_NAME }}_${{ env.TAG }}_*'
           merge-multiple: true
 
       - name: Download checksums (merge)
@@ -226,7 +228,7 @@ jobs:
       - name: Release upload (binaries + SHA256SUMS)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.resolve-tag.outputs.tag }}
+          tag_name: ${{ env.TAG }}
           fail_on_unmatched_files: true
           files: |
             *.tar.gz
