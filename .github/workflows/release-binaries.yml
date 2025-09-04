@@ -204,7 +204,7 @@ jobs:
 
   gh-release:
     name: Create/Update GitHub Release (binaries + checksums)
-    needs: [make-checksums, sign-and-sbom]
+    needs: [resolve-tag, make-checksums, sign-and-sbom]
     runs-on: ubuntu-latest
     permissions:
       contents: write
