@@ -7,11 +7,10 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v0.1.21)"
+        description: "Release tag (e.g. v0.1.22)"
         required: false
         type: string
 
-# 최소 권한(잡에서만 승격)
 permissions:
   contents: read
 
@@ -29,8 +28,8 @@ jobs:
     outputs:
       tag: ${{ steps.set.outputs.tag }}
     steps:
-      - id: set
-        name: Set tag
+      - name: Set tag
+        id: set
         shell: bash
         run: |
           set -euo pipefail
@@ -61,7 +60,6 @@ jobs:
           - { goos: windows, goarch: arm64, archive: zip }
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-go@v5
         with:
           go-version: ">=1.21"
@@ -76,8 +74,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          # cmd/thomasd 엔트리 기준으로 빌드 + ldflags 버전 주입
-          go build -trimpath -ldflags "-s -w -X main.version=${TAG} -X main.commit=${GITHUB_SHA} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o "dist/${{ env.BIN_NAME }}" ./cmd/thomasd
+          go build -trimpath -ldflags "-s -w -X main.version=${TAG} -X main.commit=${GITHUB_SHA} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o "dist/${{ env.BIN_NAME }}" ./cmd/thomasd
 
       - name: Package archive
         env:
@@ -129,19 +127,13 @@ jobs:
           retention-days: 7
 
   sign-and-sbom:
-    name: Sign checksum & generate SBOM
-    needs: [make-checksums]
+    name: Sign checksum & generate SBOM (+upload to release)
+    needs: [resolve-tag, make-checksums]
     runs-on: ubuntu-latest
     permissions:
-      id-token: write    # cosign keyless 서명
-      contents: read
+      id-token: write
+      contents: write
     steps:
-      - name: Download archives (merge)
-        uses: actions/download-artifact@v4
-        with:
-          pattern: '${{ env.BIN_NAME }}_${{ needs.resolve-tag.outputs.tag }}_*'
-          merge-multiple: true
-
       - name: Download checksums (merge)
         uses: actions/download-artifact@v4
         with:
@@ -151,13 +143,15 @@ jobs:
       - name: Setup cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: Sign SHA256SUMS.txt (keyless)
+      - name: Sign SHA256SUMS.txt (keyless, non-interactive)
         env:
-          COSIGN_EXPERIMENTAL: "1"
+          COSIGN_EXPERIMENTAL: "true"
+          COSIGN_YES: "true"
         run: |
           set -euo pipefail
           test -f SHA256SUMS.txt
           cosign sign-blob \
+            --yes \
             --output-signature SHA256SUMS.txt.sig \
             --output-certificate SHA256SUMS.txt.cert \
             SHA256SUMS.txt
@@ -170,23 +164,33 @@ jobs:
           format: spdx-json
           output-file: sbom-archives.spdx.json
 
-      - name: Write VERIFY-GHOIDC.md
+      - name: Write verify guide (GH OIDC)
         shell: bash
         run: |
-          set -euo pipefail
-          cat > VERIFY-GHOIDC.md <<'EOF'
+          cat > VERIFY-GHOIDC.md <<'MD'
           # Verify ThomasD Release Signature (GitHub OIDC)
-          ```powershell
-          cosign verify-blob `
-            --certificate .\SHA256SUMS.txt.cert `
-            --signature   .\SHA256SUMS.txt.sig `
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com `
-            --certificate-identity-regexp '^https://github.com/dopalos/thomasd/\.github/workflows/release-binaries\.yml@.*$' `
-            .\SHA256SUMS.txt
-          ```
-          EOF
 
-      - name: Upload signed checksum & SBOM (& guide)
+              cosign verify-blob `
+                --certificate .\SHA256SUMS.txt.cert `
+                --signature   .\SHA256SUMS.txt.sig `
+                --certificate-oidc-issuer https://token.actions.githubusercontent.com `
+                --certificate-identity-regexp '^https://github.com/dopalos/thomasd/\.github/workflows/release-binaries\.yml@.*$' `
+                .\SHA256SUMS.txt
+          MD
+
+      # 🔴 릴리스에 즉시 업로드 (여기서 바로 붙입니다)
+      - name: Upload sig/cert/SBOM/guide to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve-tag.outputs.tag }}
+          files: |
+            SHA256SUMS.txt.sig
+            SHA256SUMS.txt.cert
+            sbom-archives.spdx.json
+            VERIFY-GHOIDC.md
+
+      # 참고로 아티팩트도 남겨둠(디버깅용)
+      - name: Upload signed checksum & SBOM (& guide) as artifact
         uses: actions/upload-artifact@v4
         with:
           name: "signed-and-sbom-${{ needs.resolve-tag.outputs.tag }}"
@@ -199,7 +203,7 @@ jobs:
           retention-days: 7
 
   gh-release:
-    name: Create/Update GitHub Release
+    name: Create/Update GitHub Release (binaries + checksums)
     needs: [make-checksums, sign-and-sbom]
     runs-on: ubuntu-latest
     permissions:
@@ -217,15 +221,9 @@ jobs:
           pattern: 'checksums-*'
           merge-multiple: true
 
-      - name: Download signed & SBOM (merge)
-        uses: actions/download-artifact@v4
-        with:
-          pattern: 'signed-and-sbom-*'
-          merge-multiple: true
-
       - run: ls -l
 
-      - name: Release upload (fail if any missing)
+      - name: Release upload (binaries + SHA256SUMS)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.resolve-tag.outputs.tag }}
@@ -234,7 +232,3 @@ jobs:
             *.tar.gz
             *.zip
             SHA256SUMS.txt
-            SHA256SUMS.txt.sig
-            SHA256SUMS.txt.cert
-            sbom-archives.spdx.json
-            VERIFY-GHOIDC.md
