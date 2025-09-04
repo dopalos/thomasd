@@ -1,0 +1,67 @@
+﻿name: brew-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.24)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  mac-smoke:
+    name: Brew smoke on ${{ matrix.image }}
+    runs-on: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-13 = Intel (x86_64), macos-14 = Apple Silicon (arm64)
+        image: [macos-13, macos-14]
+
+    steps:
+      - name: Runner info
+        shell: bash
+        run: |
+          set -euxo pipefail
+          uname -a || true
+          sysctl -n machdep.cpu.brand_string || true
+          brew --version
+
+      - name: Tap & install thomasd
+        env:
+          TAG: ${{ github.event.inputs.tag }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          brew update
+          brew untap dopalos/homebrew-tap || true
+          brew tap dopalos/homebrew-tap
+          brew install dopalos/tap/thomasd
+          thomasd -v
+
+      - name: Smoke test (start → /health → stop)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          nohup thomasd >/tmp/thd.out 2>&1 &
+          pid=$!
+          # 헬스체크 재시도
+          for i in 1 2 3 4 5; do
+            sleep 1
+            if curl -fsS http://127.0.0.1:8081/health >/tmp/health.json; then
+              break
+            fi
+          done
+          cat /tmp/health.json
+          kill $pid || true
+          wait $pid || true
+          # 상태 ok 확인
+          python3 - <<'PY'
+import json,sys
+j=json.load(open("/tmp/health.json"))
+assert j.get("status")=="ok", j
+print("health OK")
+PY
