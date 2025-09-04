@@ -11,13 +11,21 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"syscall"
 	"time"
+)
+
+// --- version info (ldflags) ---
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
 )
 
 // NOTE: GitHub Actions에서 아래 변수에 ldflags로 주입합니다.
 // go build -ldflags "-s -w -X main.version=${TAG}"
-var version = "dev"
 
+// 추가: 런타임 플래그가 참조하는 전역 변수(원본 유지 + 누락 보강)
 var (
 	showVersion bool
 	addr        string
@@ -86,12 +94,12 @@ func main() {
 		}
 	}()
 
-	// 기존 로그 스타일 유지 (예: "2025/09/02 20:34:34 thomasd (Thomas Chain) listening on :8081")
+	// 기존 로그 스타일 유지
 	log.Printf("thomasd (Thomas Chain) listening on %s", addr)
 
-	// SIGINT/SIGTERM 그레이스풀 셧다운
+	// SIGINT/SIGTERM 그레이스풀 셧다운 (보강: SIGTERM 추가)
 	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, os.Interrupt)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
