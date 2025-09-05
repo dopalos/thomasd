@@ -5,12 +5,13 @@ ARG VERSION
 WORKDIR /src
 RUN apk add --no-cache git ca-certificates
 COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod `
-    --mount=type=cache,target=/root/.cache/go-build `
+ENV GOTOOLCHAIN=auto
+RUN --mount=type=cache,target=/go/pkg/mod  \
+    --mount=type=cache,target=/root/.cache/go-build  \
     go mod download
 COPY . .
 ENV CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH
-RUN --mount=type=cache,target=/root/.cache/go-build `
+RUN --mount=type=cache,target=/root/.cache/go-build  \
     go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/thomasd .
 FROM gcr.io/distroless/static-debian12:nonroot AS final
 WORKDIR /
