@@ -4,25 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to smoke (e.g. v0.1.24). Used only for labeling."
-        required: false
+        description: "Release tag (e.g. v0.1.24)"
+        required: true
         type: string
-  push:
-    tags:
-      - "v*"
-
-permissions:
-  contents: read
 
 jobs:
-  mac-brew:
-    name: Brew smoke on ${{ matrix.runner }}
+  brew-smoke:
+    name: Brew smoke on ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        # macos-13 = Intel (x86_64), macos-14 = Apple Silicon (arm64)
-        runner: [macos-13, macos-14]
+        include:
+          - { name: macos-13, runner: macos-13 }
+          - { name: macos-14, runner: macos-14-arm64 }
+
     steps:
       - name: Prep Homebrew
         run: |
@@ -33,10 +29,17 @@ jobs:
             brew untap dopalos/tap
           fi
           brew tap dopalos/tap
+          brew update
+          # tap이 있을 때만 untap
+          if brew tap | grep -q '^dopalos/tap$'; then
+            brew untap dopalos/tap
+          fi
+          brew tap dopalos/tap
+
       - name: Install thomasd from tap
         run: |
           set -euo pipefail
-          brew install dopalos/tap/thomasd
+          brew install dopalos/tap/thomasd || brew reinstall dopalos/tap/thomasd
           thomasd -v
 
       - name: Quick run & health (best-effort)

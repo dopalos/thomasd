@@ -1,0 +1,34 @@
+name: scoop-smoke
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  scoop:
+    name: Scoop smoke on windows-latest
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Install Scoop and dopalos bucket
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+          iwr -useb get.scoop.sh | iex
+          scoop bucket rm dopalos 2>$null | Out-Null
+          scoop bucket add dopalos https://github.com/dopalos/scoop-bucket
+          scoop update
+      - name: Install thomasd via Scoop
+        shell: pwsh
+        run: |
+          scoop install thomasd
+          thomasd -v
+      - name: Quick run & health
+        shell: pwsh
+        run: |
+          $p = Start-Process thomasd -WindowStyle Hidden -PassThru
+          Start-Sleep 1
+          try {
+            (Invoke-RestMethod 'http://127.0.0.1:8081/health' -TimeoutSec 2) | ConvertTo-Json -Depth 5
+          } finally {
+            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+          }
