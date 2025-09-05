@@ -1,4 +1,4 @@
-﻿name: brew-smoke
+name: brew-smoke
 
 on:
   workflow_dispatch:
@@ -28,9 +28,11 @@ jobs:
         run: |
           set -euo pipefail
           brew update
-          brew untap dopalos/tap || true
+          # tap이 있을 때만 untap
+          if brew tap | grep -q '^dopalos/tap$'; then
+            brew untap dopalos/tap
+          fi
           brew tap dopalos/tap
-
       - name: Install thomasd from tap
         run: |
           set -euo pipefail
