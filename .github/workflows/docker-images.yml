@@ -1,13 +1,11 @@
-﻿name: docker-images
+name: docker-images
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
         description: "Release tag (e.g. v0.1.24)"
-        required: false
+        required: true
         type: string
 
 permissions:
@@ -15,88 +13,123 @@ permissions:
   packages: write
   id-token: write
 
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/thomasd
+
 jobs:
   resolve-tag:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.set.outputs.tag }}
+      no_v: ${{ steps.set.outputs.no_v }}
     steps:
       - id: set
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -n "${{ github.event.inputs.tag || '' }}" ]]; then
-            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
-          elif [[ "${GITHUB_REF:-}" =~ ^refs/tags/ ]]; then
-            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          else
-            echo "no tag" >&2; exit 1
+          TAG="${{ github.event.inputs.tag }}"
+          if [[ -z "${TAG}" ]]; then
+            echo "tag input is required" >&2
+            exit 1
           fi
+          NO_V="${TAG#v}"
+          echo "tag=$TAG"  >> "$GITHUB_OUTPUT"
+          echo "no_v=$NO_V" >> "$GITHUB_OUTPUT"
+          echo "Tag=$TAG  NoV=$NO_V"
 
   build-push:
+    name: Build & push (linux/amd64, arm64)
     needs: resolve-tag
     runs-on: ubuntu-latest
-    env:
-      TAG: ${{ needs.resolve-tag.outputs.tag }}
-      IMAGE: ghcr.io/${{ github.repository }}
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ github.token }}
-      - uses: docker/metadata-action@v5
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Metadata (tags/labels)
         id: meta
+        uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE }}
+          images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=${{ env.TAG }}
+            type=raw,value=${{ needs.resolve-tag.outputs.tag }}
+            type=raw,value=${{ needs.resolve-tag.outputs.no_v }}
             type=raw,value=latest
-      - name: Build & push (linux/amd64, arm64)
+            type=sha
+
+      - name: Compute build args
+        id: vars
+        shell: bash
+        run: |
+          echo "DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push (multi-arch)
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          build-args: |
-            VERSION=${{ env.TAG }}
-            COMMIT=${{ github.sha }}
-            DATE=${{ github.run_started_at }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.resolve-tag.outputs.tag }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ steps.vars.outputs.DATE }}
+
+      - name: Make package public (best-effort)
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          curl -fsSL -X PUT \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/user/packages/container/thomasd/visibility \
+            -d '{"visibility":"public"}' || true
 
   sign:
+    name: Cosign sign (keyless)
     needs: [resolve-tag, build-push]
     runs-on: ubuntu-latest
-    env:
-      COSIGN_YES: "true"
-      COSIGN_EXPERIMENTAL: "true"
-      IMAGE: ghcr.io/${{ github.repository }}
-      TAG: ${{ needs.resolve-tag.outputs.tag }}
     steps:
       - uses: sigstore/cosign-installer@v3
-      - name: Sign images (keyless OIDC)
+      - name: Sign all tags
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+          COSIGN_YES: "true"
         shell: bash
         run: |
           set -euo pipefail
-          for t in "${TAG}" latest; do
-            cosign sign --yes "${IMAGE}:${t}"
-          done
+          IMG="${{ env.IMAGE_NAME }}"
+          TAG="${{ needs.resolve-tag.outputs.tag }}"
+          cosign sign --yes "${IMG}@${{ needs.build-push.outputs.digest }}"
+          cosign sign --yes "${IMG}:${TAG}"
+          cosign sign --yes "${IMG}:latest"
 
   smoke:
+    name: Smoke run & health
     needs: [resolve-tag, build-push]
     runs-on: ubuntu-latest
     steps:
-      - name: Pull & run container, then curl /health
-        env:
-          IMAGE: ghcr.io/${{ github.repository }}:${{ needs.resolve-tag.outputs.tag }}
+      - name: Run container
+        shell: bash
         run: |
           set -euo pipefail
-          docker run -d --rm --name thomasd -p 8081:8081 "$IMAGE"
+          IMG="${{ env.IMAGE_NAME }}:${{ needs.resolve-tag.outputs.tag }}"
+          docker run -d --rm -p 8081:8081 --name thomasd "$IMG"
           sleep 1
           curl -fsS http://127.0.0.1:8081/health
-          docker stop thomasd
+          docker rm -f thomasd
