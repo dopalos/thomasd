@@ -1,4 +1,4 @@
-name: docker-images
+﻿name: docker-images
 
 on:
   push:
@@ -55,7 +55,6 @@ jobs:
           git log -1 --oneline -- Dockerfile || true
           head -n 60 Dockerfile || sed -n "1,60p" Dockerfile
 
-
       - uses: docker/setup-qemu-action@v3
       - id: buildx
         uses: docker/setup-buildx-action@v3
@@ -81,11 +80,10 @@ jobs:
       - id: dp
         uses: docker/build-push-action@v6
         with:
-          no-cache: true
-        with:
           context: .
           file: ./Dockerfile
           push: true
+          no-cache: true
           labels: ${{ steps.meta.outputs.labels }}
           tags: ${{ steps.meta.outputs.tags }}
           build-args: |
