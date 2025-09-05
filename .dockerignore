@@ -1,0 +1,6 @@
+.git
+.github
+verify-*
+scripts
+verify-*.log
+*.md
