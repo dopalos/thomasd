@@ -1,0 +1,48 @@
+name: brew-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to smoke (e.g. v0.1.24). Used only for labeling."
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  mac-brew:
+    name: Brew smoke on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-13 = Intel (x86_64), macos-14 = Apple Silicon (arm64)
+        runner: [macos-13, macos-14]
+    steps:
+      - name: Prep Homebrew
+        run: |
+          set -euo pipefail
+          brew update
+          # tap이 있을 때만 untap
+          if brew tap | grep -q '^dopalos/tap$'; then
+            brew untap dopalos/tap
+          fi
+          brew tap dopalos/tap
+      - name: Install thomasd from tap
+        run: |
+          set -euo pipefail
+          brew install dopalos/tap/thomasd
+          thomasd -v
+
+      - name: Quick run & health (best-effort)
+        run: |
+          set -euo pipefail
+          (nohup thomasd >/tmp/thomasd.log 2>&1 & echo $! > /tmp/thomasd.pid) || true
+          sleep 1
+          curl -fsS http://127.0.0.1:8081/health || true
+          if [ -f /tmp/thomasd.pid ]; then kill $(cat /tmp/thomasd.pid) || true; fi

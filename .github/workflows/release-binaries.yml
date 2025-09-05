@@ -1,19 +1,25 @@
 ﻿name: release-binaries
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: Tag to release (e.g. v0.1.10)
-        required: true
-
-env:
-  BIN_NAME: thomasd
-  BUILD_DIR: cmd/thomasd
-  GO_VERSION: 1.25.x
+        description: "Release tag (e.g. v0.1.22)"
+        required: false
+        type: string
 
 permissions:
   contents: read
+
+concurrency:
+  group: "release-${{ github.event.inputs.tag || github.ref_name }}"
+  cancel-in-progress: false
+
+env:
+  BIN_NAME: thomasd
 
 jobs:
   resolve-tag:
@@ -24,18 +30,19 @@ jobs:
     steps:
       - name: Set tag
         id: set
+        shell: bash
         run: |
           set -euo pipefail
-          TAG="${{ github.event.inputs.tag || '' }}"
-          if [ -z "$TAG" ] && [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          if [[ -n "${{ github.event.inputs.tag || '' }}" ]]; then
+            TAG="${{ github.event.inputs.tag }}"
+          elif [[ "${GITHUB_REF:-}" =~ ^refs/tags/ ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
-          fi
-          if [ -z "$TAG" ]; then
-            echo "Could not resolve tag. Pass 'tag' input or run on tag push/release." >&2
+          else
+            echo "No tag provided and GITHUB_REF is not a tag." >&2
             exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Resolved tag: $TAG"
+          echo "Tag = $TAG"
 
   build:
     name: Build & package (${{ matrix.goos }}, ${{ matrix.goarch }}, ${{ matrix.archive }})
@@ -45,90 +52,185 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { goos: linux,   goarch: amd64, archive: tar.gz, ext: "" }
-          - { goos: linux,   goarch: arm64, archive: tar.gz, ext: "" }
-          - { goos: darwin,  goarch: amd64, archive: tar.gz, ext: "" }
-          - { goos: darwin,  goarch: arm64, archive: tar.gz, ext: "" }
-          - { goos: windows, goarch: amd64, archive: zip,    ext: ".exe" }
-          - { goos: windows, goarch: arm64, archive: zip,    ext: ".exe" }
-    env:
-      TAG: ${{ needs.resolve-tag.outputs.tag }}
+          - { goos: linux,   goarch: amd64, archive: tar.gz }
+          - { goos: linux,   goarch: arm64, archive: tar.gz }
+          - { goos: darwin,  goarch: amd64, archive: tar.gz }
+          - { goos: darwin,  goarch: arm64, archive: tar.gz }
+          - { goos: windows, goarch: amd64, archive: zip }
+          - { goos: windows, goarch: arm64, archive: zip }
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version: ">=1.21"
           cache: true
 
-      - name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+      - name: Build ${{ env.BIN_NAME }} (${{ matrix.goos }}/${{ matrix.goarch }})
+        env:
+          CGO_ENABLED: "0"
+          GOOS:  ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          TAG:   ${{ needs.resolve-tag.outputs.tag }}
         run: |
           set -euo pipefail
-          mkdir -p dist/bin
-          OUT="dist/bin/${BIN_NAME}${{ matrix.ext }}"
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
-            go build -trimpath -ldflags "-s -w -X 'main.version=${TAG}'" \
-            -o "${OUT}" "./${BUILD_DIR}"
-          if [ -z "${{ matrix.ext }}" ]; then chmod +x "${OUT}"; fi
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w -X main.version=${TAG} -X main.commit=${GITHUB_SHA} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o "dist/${{ env.BIN_NAME }}" ./cmd/thomasd
 
-      - name: Package (${{ matrix.archive }})
+      - name: Package archive
+        env:
+          TAG: ${{ needs.resolve-tag.outputs.tag }}
         run: |
           set -euo pipefail
-          NAME="${BIN_NAME}_${TAG}_${{ matrix.goos }}_${{ matrix.goarch }}"
-          if [ "${{ matrix.archive }}" = "tar.gz" ]; then
-            tar -C dist/bin -czf "dist/${NAME}.tar.gz" "${BIN_NAME}"
+          cd dist
+          NAME="${{ env.BIN_NAME }}_${TAG}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            mv "${{ env.BIN_NAME }}" "${{ env.BIN_NAME }}.exe"
+            zip -9 "${NAME}.zip" "${{ env.BIN_NAME }}.exe"
           else
-            (cd dist/bin && zip -q "../${NAME}.zip" "${BIN_NAME}${{ matrix.ext }}")
+            tar czf "${NAME}.tar.gz" "${{ env.BIN_NAME }}"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload per-target artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: "${{ env.BIN_NAME }}_${{ env.TAG }}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          name: "${{ env.BIN_NAME }}_${{ needs.resolve-tag.outputs.tag }}_${{ matrix.goos }}_${{ matrix.goarch }}"
           path: |
             dist/*.tar.gz
             dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
 
-  checksums:
+  make-checksums:
     name: Make checksums
-    needs: build
+    needs: [resolve-tag, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download all build artifacts (merge)
+        uses: actions/download-artifact@v4
         with:
+          pattern: '${{ env.BIN_NAME }}_${{ needs.resolve-tag.outputs.tag }}_*'
           merge-multiple: true
+
       - name: Generate SHA256SUMS.txt
         run: |
           set -euo pipefail
-          shopt -s globstar nullglob
-          : > SHA256SUMS.txt
-          for f in **/*.tar.gz **/*.zip; do
-            [ -f "$f" ] && sha256sum "$f" >> SHA256SUMS.txt
-          done
-          echo "Generated:"
-          cat SHA256SUMS.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: checksums
-          path: SHA256SUMS.txt
+          sha256sum *.tar.gz *.zip | awk '{printf "%s  %s\n",$1,$2}' > SHA256SUMS.txt
+          echo "----"; cat SHA256SUMS.txt
 
-  release:
-    name: Create/Update GitHub Release
-    needs: [resolve-tag, build, checksums]
+      - name: Upload checksums artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: "checksums-${{ needs.resolve-tag.outputs.tag }}"
+          path: SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  sign-and-sbom:
+    name: Sign checksum & generate SBOM (+upload to release)
+    needs: [resolve-tag, make-checksums]
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - name: Download checksums (merge)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: 'checksums-*'
+          merge-multiple: true
+
+      - name: Setup cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign SHA256SUMS.txt (keyless, non-interactive)
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          test -f SHA256SUMS.txt
+          cosign sign-blob \
+            --yes \
+            --output-signature SHA256SUMS.txt.sig \
+            --output-certificate SHA256SUMS.txt.cert \
+            SHA256SUMS.txt
+          ls -l SHA256SUMS.txt*
+
+      - name: Generate SBOM (SPDX JSON)
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: sbom-archives.spdx.json
+
+      - name: Write verify guide (GH OIDC)
+        shell: bash
+        run: |
+          cat > VERIFY-GHOIDC.md <<'MD'
+          # Verify ThomasD Release Signature (GitHub OIDC)
+
+              cosign verify-blob `
+                --certificate .\SHA256SUMS.txt.cert `
+                --signature   .\SHA256SUMS.txt.sig `
+                --certificate-oidc-issuer https://token.actions.githubusercontent.com `
+                --certificate-identity-regexp '^https://github.com/dopalos/thomasd/\.github/workflows/release-binaries\.yml@.*$' `
+                .\SHA256SUMS.txt
+          MD
+
+      # 🔴 릴리스에 즉시 업로드 (여기서 바로 붙입니다)
+      - name: Upload sig/cert/SBOM/guide to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve-tag.outputs.tag }}
+          files: |
+            SHA256SUMS.txt.sig
+            SHA256SUMS.txt.cert
+            sbom-archives.spdx.json
+            VERIFY-GHOIDC.md
+
+      # 참고로 아티팩트도 남겨둠(디버깅용)
+      - name: Upload signed checksum & SBOM (& guide) as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: "signed-and-sbom-${{ needs.resolve-tag.outputs.tag }}"
+          path: |
+            SHA256SUMS.txt.sig
+            SHA256SUMS.txt.cert
+            sbom-archives.spdx.json
+            VERIFY-GHOIDC.md
+          if-no-files-found: error
+          retention-days: 7
+
+  gh-release:
+    name: Create/Update GitHub Release (binaries + checksums)
+    needs: [resolve-tag, make-checksums, sign-and-sbom]
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.resolve-tag.outputs.tag }}
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download archives (merge)
+        uses: actions/download-artifact@v4
         with:
+          pattern: '${{ env.BIN_NAME }}_${{ env.TAG }}_*'
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+
+      - name: Download checksums (merge)
+        uses: actions/download-artifact@v4
         with:
-          tag_name: ${{ needs.resolve-tag.outputs.tag }}
-          generate_release_notes: true
-          files: |
-            **/*.tar.gz
-            **/*.zip
-            SHA256SUMS.txt
+          pattern: 'checksums-*'
+          merge-multiple: true
+
+      - run: ls -l
+
+      - name: Release upload (binaries + SHA256SUMS)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
           fail_on_unmatched_files: true
+          files: |
+            *.tar.gz
+            *.zip
+            SHA256SUMS.txt
