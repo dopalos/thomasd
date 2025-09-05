@@ -1,4 +1,4 @@
-﻿name: docker-images
+name: docker-images
 
 on:
   push:
@@ -48,6 +48,13 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
+
+      - name: Debug: show ref & Dockerfile head
+        run: |
+          echo "REF: ${{ github.ref }}  HEAD_REF: ${{ github.head_ref }}"
+          git log -1 --oneline -- Dockerfile || true
+          head -n 60 Dockerfile || sed -n "1,60p" Dockerfile
+
 
       - uses: docker/setup-qemu-action@v3
       - id: buildx
