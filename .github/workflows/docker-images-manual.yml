@@ -1,4 +1,4 @@
-name: docker-images-manual
+﻿name: docker-images-manual
 
 on:
   push:
@@ -14,6 +14,8 @@ on:
         description: "Main package path (e.g., ./cmd/thomasd). Leave empty to auto-detect."
         required: false
         type: string
+  repository_dispatch:
+    types: [container-build]
 
 permissions:
   contents: read
@@ -32,20 +34,25 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve tag (never fail)
-        id: resolve_tag
+      - name: Resolve tag/app_main (wf + repo_dispatch)
+        id: resolve
+        env:
+          IN_TAG_WF: ${{ github.event.inputs.tag }}
+          IN_TAG_RD: ${{ github.event.client_payload.tag }}
+          IN_APP_WF: ${{ github.event.inputs.app_main }}
+          IN_APP_RD: ${{ github.event.client_payload.app_main }}
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -n "${{ github.event.inputs.tag || '' }}" ]]; then
-            TAG="${{ github.event.inputs.tag }}"
-          elif [[ "${GITHUB_REF:-}" =~ ^refs/tags/ ]]; then
-            TAG="${GITHUB_REF#refs/tags/}"
-          else
+          TAG="${IN_TAG_WF:-}"; [ -z "$TAG" ] && TAG="${IN_TAG_RD:-}"
+          if [ -z "$TAG" ] && [[ "${GITHUB_REF:-}" =~ ^refs/tags/ ]]; then TAG="${GITHUB_REF#refs/tags/}"; fi
+          if [ -z "$TAG" ]; then
             REF="${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
             TAG="$(echo "$REF" | tr '[:upper:]' '[:lower:]' | sed -E 's#[^a-z0-9._-]+#-#g')"
           fi
+          APP_MAIN="${IN_APP_WF:-}"; [ -z "$APP_MAIN" ] && APP_MAIN="${IN_APP_RD:-}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "app_main=$APP_MAIN" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
 
@@ -56,8 +63,7 @@ jobs:
           head -n 60 Dockerfile || sed -n "1,60p" Dockerfile
 
       - uses: docker/setup-qemu-action@v3
-      - id: buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
         with:
@@ -70,25 +76,23 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=${{ steps.resolve_tag.outputs.tag }}
+            type=raw,value=${{ steps.resolve.outputs.tag }}
             type=sha
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main' }}
           labels: |
             org.opencontainers.image.title=thomasd
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
 
-      - id: dp
-        uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           push: true
-          no-cache: true
           labels: ${{ steps.meta.outputs.labels }}
           tags: ${{ steps.meta.outputs.tags }}
           build-args: |
-            VERSION=${{ steps.resolve_tag.outputs.tag }}
-            APP_MAIN=${{ github.event.inputs.app_main }}
+            VERSION=${{ steps.resolve.outputs.tag }}
+            APP_MAIN=${{ steps.resolve.outputs.app_main }}
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
