@@ -1,14 +1,14 @@
-name: promote-image
+﻿name: promote-image
 
 on:
   workflow_dispatch:
     inputs:
       from:
-        description: "Source tag (e.g., ci-20250909131211)"
+        description: "Source tag (already exists, e.g. ci-20250909131211)"
         required: true
         type: string
       tags:
-        description: "Destination tags (comma or space separated, e.g., latest v0.1.26)"
+        description: "Comma-separated target tags (e.g. latest,v0.1.26)"
         required: true
         type: string
 
@@ -16,52 +16,44 @@ permissions:
   contents: read
   packages: write
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
 jobs:
   retag:
     runs-on: ubuntu-latest
     steps:
-      # 1) GHCR 로그인: PAT 우선, 없으면 GITHUB_TOKEN 사용
-      - name: Login to GHCR with PAT
-        if: ${{ secrets.GHCR_TOKEN != '' }}
+      - name: Login to GHCR (GITHUB_TOKEN)
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ secrets.GHCR_USERNAME || github.repository_owner }}
-          password: ${{ secrets.GHCR_TOKEN }}
-
-      - name: Login to GHCR with GITHUB_TOKEN
-        if: ${{ secrets.GHCR_TOKEN == '' }}
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/setup-buildx-action@v3
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
 
-      # 2) 재빌드 없이 태그 복제 (서버사이드)
-      - name: Promote tags without rebuild
+      - name: Check source image exists
         shell: bash
-        env:
-          IMAGE: ghcr.io/${{ github.repository }}
-          FROM:  ${{ inputs.from }}
-          TAGS:  ${{ inputs.tags }}
         run: |
           set -euo pipefail
-          echo "Checking source: ${IMAGE}:${FROM}"
-          docker buildx imagetools inspect "${IMAGE}:${FROM}" >/dev/null
+          SRC="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.from }}"
+          echo "Inspect $SRC"
+          docker buildx imagetools inspect "$SRC" >/dev/null
+          echo "OK"
 
-          # 입력 파싱: 쉼표/스페이스 모두 허용, 트리밍, 중복/빈값/동일태그 스킵
-          TAGS="${TAGS//,/ }"
-          declare -A seen=()
-          for raw in $TAGS; do
-            t="$(echo "$raw" | xargs)"
-            [[ -z "$t" ]] && continue
-            [[ "$t" == "$FROM" ]] && { echo "skip same tag: $t"; continue; }
-            [[ -n "${seen[$t]:-}" ]] && { echo "skip dup tag: $t"; continue; }
-            echo ">> Tagging ${IMAGE}:${FROM} -> ${IMAGE}:${t}"
-            docker buildx imagetools create --tag "${IMAGE}:${t}" "${IMAGE}:${FROM}"
-            seen[$t]=1
+      - name: Promote tags without rebuild
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.from }}"
+          IFS=',' read -ra TARGETS <<< "${{ inputs.tags }}"
+          for t in "${TARGETS[@]}"; do
+            t="$(echo "$t" | xargs)"
+            [ -n "$t" ] || continue
+            DST="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$t"
+            echo ">> $SRC  ->  $DST"
+            docker buildx imagetools create --tag "$DST" "$SRC"
           done
-
-          echo "Done."
+          echo "done."
