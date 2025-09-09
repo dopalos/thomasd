@@ -89,3 +89,4 @@ jobs:
           platforms: linux/amd64
           provenance: mode=max
           sbom: true
+
