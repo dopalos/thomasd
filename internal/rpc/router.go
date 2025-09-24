@@ -1823,7 +1823,14 @@ func jsonizeSigErrors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cap := &bufferingWriter{header: make(http.Header)}
 		next.ServeHTTP(cap, r)
-
+		if r.URL.Path != "/tx" {
+			copyHeader(w.Header(), cap.header)
+			if cap.status != 0 {
+				w.WriteHeader(cap.status)
+			}
+			_, _ = w.Write(cap.body.Bytes())
+			return
+		}
 		reason := ""
 		rewrite := false
 
