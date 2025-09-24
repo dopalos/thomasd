@@ -1,167 +1,257 @@
-﻿package rpc
+package rpc
 
 import (
-	"thomasd/server"
-
-
-	"encoding/hex"
-	"encoding/json"
-	"io"
-	"log"
-	"net/http"
-	"runtime/pprof"
-	"strconv"
-	"strings"
-	"thomasd/internal/buildinfo"
-	"time"
-
 	"bytes"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"expvar"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"reflect"
 	"runtime"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
-	"thomasd/internal/app"
-	"thomasd/internal/codec"
-	"thomasd/internal/tx"
+	app "thomasd/internal/app"
+	"thomasd/internal/buildinfo"
+	mycrypto "thomasd/internal/crypto"
+	"thomasd/internal/light"
+	"thomasd/internal/rewards"
+	"thomasd/internal/state/validators"
+	"thomasd/internal/types"
+	"time"
 
-	"expvar"
+	tx "thomasd/internal/tx"
 )
 
-// AUTO: TX Precheck middleware (chain_id / expiry / min fee_bps)
+// ----- 주의 -----
+// 1) 여기에는 mux나 Handler()를 선언하지 않습니다.
+//    (var mux = http.NewServeMux(), func Handler() http.Handler { ... } 는
+//     engine_params_glue.go 에만 있습니다.)
+// 2) encodeR2PCursor / decodeR2PCursor 는 r2p_cursor.go 에 이미 있으니
+//    여기에는 절대 다시 정의하지 않습니다.
 
-type txPre struct {
-	Type          int    `json:"type"`
-	From          string `json:"from"`
-	To            string `json:"to"`
-	AmountMas     int64  `json:"amount_mas"`
-	FeeMas        int64  `json:"fee_mas"`
-	Nonce         int64  `json:"nonce"`
-	ChainID       string `json:"chain_id"`
-	ExpiryHeight  int64  `json:"expiry_height"`
-	MsgCommitment string `json:"msg_commitment"`
-	Sig           string `json:"sig,omitempty"`
+// ============================
+// R2P 메모리 스토어 (누락 보강)
+// ============================
+
+type r2pRecord struct {
+	ID           string `json:"id"`
+	From         string `json:"from"`
+	To           string `json:"to"`
+	AmountMas    uint64 `json:"amount_mas"`
+	Memo         string `json:"memo,omitempty"`
+	Status       string `json:"status"` // open|paid|declined|canceled
+	CreatedUTC   int64  `json:"created_utc"`
+	PaidUTC      int64  `json:"paid_utc,omitempty"`
+	DeclinedUTC  int64  `json:"declined_utc,omitempty"`
+	CanceledUTC  int64  `json:"canceled_utc,omitempty"`
+	TxHash       string `json:"tx_hash,omitempty"`
+	Alias        string `json:"alias,omitempty"`
+	AliasVersion int64  `json:"alias_version,omitempty"`
 }
 
-func minFeeMas(amount int64, bps int) int64 {
-	f := (amount * int64(bps)) / 10000
-	if f < 1 {
-		f = 1
-	}
-	return f
+var (
+	r2pMu    sync.Mutex
+	r2pStore = map[string]*r2pRecord{}
+)
+
+// 민감 응답(지갑 생성/복구)에 공통 적용할 헤더
+func setSensitiveNoStoreHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 }
 
-// AUTO: debuglog rate limit (token bucket)
-var dbgMu sync.Mutex
-var dbgTokens int64
-var dbgCap int64 = 100           // burst
-var dbgRefillPerSec float64 = 50 // refill per second
-var dbgLast time.Time
+// on-disk 복원 훅: 현재는 선택 구현이므로 no-op
+func callLoadR2PIfExists() { /* best-effort: 다른 파일에 있으면 그걸 쓰고, 없으면 무시 */
+}
+func saveR2P() { /* 베어 메탈 환경에서는 no-op. 파일 저장 구현이 따로 있으면 그걸 사용 */
+}
 
-func dbgRefill(now time.Time) {
-	if dbgLast.IsZero() {
-		dbgLast = now
-		dbgTokens = dbgCap
-		return
+func genR2PID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func r2pUpdatedAt(x r2pRecord) int64 {
+	m := x.CreatedUTC
+	if x.PaidUTC > m {
+		m = x.PaidUTC
 	}
-	elapsed := now.Sub(dbgLast).Seconds()
-	if elapsed <= 0 {
-		return
+	if x.DeclinedUTC > m {
+		m = x.DeclinedUTC
 	}
-	add := int64(elapsed * dbgRefillPerSec)
-	if add > 0 {
-		dbgTokens += add
-		if dbgTokens > dbgCap {
-			dbgTokens = dbgCap
+	if x.CanceledUTC > m {
+		m = x.CanceledUTC
+	}
+	return m
+}
+
+// ============================
+// Alias/주소 해석 (누락 보강)
+// ============================
+
+// 엔진에 있는 다양한 alias 해석 시그니처를 반사로 호출해 통일
+func callEngResolveAlias(eng *app.Engine, name string) (map[string]any, bool) {
+	rv := reflect.ValueOf(eng)
+	candidates := []string{"ResolveAliasFile", "ResolveAlias", "AliasResolve", "GetAlias", "GetAliasRecord", "AliasLookup"}
+	for _, mname := range candidates {
+		m := rv.MethodByName(mname)
+		if !m.IsValid() {
+			continue
 		}
-		dbgLast = now
+		outs := m.Call([]reflect.Value{reflect.ValueOf(name)})
+		switch len(outs) {
+		case 1:
+			return toMap(outs[0].Interface()), true
+		case 2:
+			rec := toMap(outs[0].Interface())
+			ok := false
+			if b, ok2 := outs[1].Interface().(bool); ok2 {
+				ok = b
+			}
+			if !ok {
+				return map[string]any{}, true // 구현됐으나 미해결
+			}
+			return rec, true
+		}
 	}
+	return nil, false
 }
-func dbgAllow() bool {
-	dbgMu.Lock()
-	defer dbgMu.Unlock()
-	dbgRefill(time.Now())
-	if dbgTokens > 0 {
-		dbgTokens--
-		return true
+
+func callEngReverseAlias(eng *app.Engine, addr string) (name string, implemented bool, found bool) {
+	rv := reflect.ValueOf(eng)
+	candidates := []string{"ReverseAliasFile", "ReverseAlias", "AliasReverse", "GetAliasByAddress", "AliasOf"}
+	for _, mname := range candidates {
+		m := rv.MethodByName(mname)
+		if !m.IsValid() {
+			continue
+		}
+		outs := m.Call([]reflect.Value{reflect.ValueOf(addr)})
+		switch len(outs) {
+		case 1:
+			if s, ok := outs[0].Interface().(string); ok && s != "" {
+				return s, true, true
+			}
+			return "", true, false
+		case 2:
+			s, _ := outs[0].Interface().(string)
+			b, _ := outs[1].Interface().(bool)
+			return s, true, b
+		}
 	}
-	return false
+	return "", false, false
 }
-func debuglogRateLimit(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/tx" && r.Method == http.MethodPost && r.URL.Query().Get("debuglog") == "1" {
-			if !dbgAllow() {
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Retry-After", "1")
-				w.WriteHeader(http.StatusTooManyRequests)
-				_ = json.NewEncoder(w).Encode(map[string]any{
-					"error":          "rate_limited",
-					"retry_after_ms": 1000,
-				})
-				return
+
+func toMap(v any) map[string]any {
+	if v == nil {
+		return map[string]any{}
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return map[string]any{}
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		return map[string]any{}
+	}
+	return m
+}
+
+func extractInt64(m map[string]any, key string) int64 {
+	if m == nil {
+		return 0
+	}
+	if v, ok := m[key]; ok {
+		switch t := v.(type) {
+		case float64:
+			return int64(t)
+		case int64:
+			return t
+		case int:
+			return int64(t)
+		case json.Number:
+			i, _ := t.Int64()
+			return i
+		}
+	}
+	if key == "version" {
+		if v, ok := m["Version"]; ok {
+			if f, ok2 := v.(float64); ok2 {
+				return int64(f)
 			}
 		}
-		next.ServeHTTP(w, r)
-	})
+	}
+	return 0
 }
 
-var bootTime = time.Now()
-
-const (
-	feeBPS          = 10 // 0.1%
-	allowedChainID  = "thomas-dev-1"
-	masPerTHO       = 10_000_000
-	masPerMicro     = 10
-	maxMsgCommitLen = 64
-)
-
-func NewRouter(eng *app.Engine) http.Handler {
-
-	mux := http.NewServeMux()
-
-	
-    // auto-patch: expose signed_msg & tx routes
-    server.SetExposeSignedMsg(true)
-  // server.RegisterSignedMsgRoutes(mux) // disabled to avoid /round/ conflict
-    server.RegisterTxRoutes(mux)
-if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
-
-		if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
-
-			mux.Handle("/debug/vars", expvar.Handler())
-
+// 입력 문자열이 @별명이면 alias 해석, 아니면 주소로 간주
+func resolveAddressMaybeAlias(eng *app.Engine, in string) (addr string, aliasNorm string, aliasVer int64, ok bool) {
+	if strings.HasPrefix(in, "@") {
+		rec, implemented := callEngResolveAlias(eng, in)
+		if !implemented {
+			return "", "", 0, false
 		}
+		ad, _ := rec["address"].(string)
+		if ad == "" {
+			return "", "", 0, false
+		}
+		return ad, strings.TrimPrefix(in, "@"), extractInt64(rec, "version"), true
 	}
-	// --- Debug: echo ---
+	return in, "", 0, true
+}
+
+func resolveAddrMaybeAlias(eng *app.Engine, in string) (string, error) {
+	addr, _, _, ok := resolveAddressMaybeAlias(eng, in)
+	if !ok || addr == "" {
+		return "", fmt.Errorf("bad_owner_or_alias")
+	}
+	return addr, nil
+}
+
+// ==========================
+// 라우팅: 엔드포인트 등록
+// ==========================
+
+func init() {
+	// R2P on-disk 복원은 선택 사항이므로, 정의가 없는 레포에서도 컴파일되도록
+	// 존재할 때만 호출(리플렉션)로 처리합니다.
+	callLoadR2PIfExists()
+
+	// expvar (optional)
+	if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
+		mux.Handle("/debug/vars", expvar.Handler())
+	}
+
+	// Debug echo
 	mux.HandleFunc("/debug/echo", func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Write(b)
+		_, _ = w.Write(b)
 	})
 
-	// --- Debug: stack dump ---
+	// Debug stack
 	mux.HandleFunc("/debug/stack", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_ = pprof.Lookup("goroutine").WriteTo(w, 2)
+		_ = pprofGoroutine().WriteTo(w, 2)
 	})
 
-	// --- Health ---
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"status":   "ok",
-			"time_utc": time.Now().UTC().Format(time.RFC3339),
-		})
-	})
-
-	// --- SSE ---
+	// SSE
 	mux.HandleFunc("/events/stream", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -185,16 +275,16 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 			case <-notify:
 				return
 			case msg := <-ch:
-				w.Write([]byte("event: push\n"))
-				w.Write([]byte("data: "))
-				w.Write(msg)
-				w.Write([]byte("\n\n"))
+				_, _ = w.Write([]byte("event: push\n"))
+				_, _ = w.Write([]byte("data: "))
+				_, _ = w.Write(msg)
+				_, _ = w.Write([]byte("\n\n"))
 				fl.Flush()
 			}
 		}
 	})
 
-	// --- Node info ---
+	// Node info
 	mux.HandleFunc("/node/info", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -207,7 +297,7 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 		})
 	})
 
-	// --- Height ---
+	// Height
 	mux.HandleFunc("/height", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -218,7 +308,7 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 		_ = json.NewEncoder(w).Encode(map[string]any{"height": h})
 	})
 
-	// --- Policy ---
+	// Policy
 	mux.HandleFunc("/policy", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -227,11 +317,17 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"unit":               "mas",
-			"fee_bps":            feeBPS,
+			"fee_bps":            feeBps,
 			"min_fee_mas":        1,
 			"max_msg_commit_len": maxMsgCommitLen,
-			"allowed_chain_id":   allowedChainID,
-			"expiry_rule":        "valid if expiry_height==0 OR current_height < expiry_height",
+			"allowed_chain_id":   expectedChainID,
+			"alias_enabled":      os.Getenv("THOMAS_FEAT_ALIAS") == "1",
+			"r2p_enabled":        os.Getenv("THOMAS_FEAT_R2P") == "1",
+			"require": map[string]any{
+				"commit":      os.Getenv("THOMAS_REQUIRE_COMMIT") == "1",
+				"signature":   os.Getenv("THOMAS_VERIFY_SIG") == "1",
+				"from_pubkey": os.Getenv("THOMAS_REQUIRE_FROM_PUBKEY") == "1",
+			},
 			"signing": map[string]any{
 				"algo":             "ed25519",
 				"pubkey_hex":       eng.PubKeyHex(),
@@ -240,7 +336,83 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 		})
 	})
 
-	// --- Account ---
+	// Health (canonical)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":   "ok",
+			"time_utc": time.Now().UTC().Format(time.RFC3339),
+		})
+	})
+
+	// Health invariants
+	mux.HandleFunc("/health/invariants", func(w http.ResponseWriter, r *http.Request) {
+		h := eng.CurrentHeight()
+		receiptCount := uint64(eng.ReceiptCount())
+		ok := (h == receiptCount)
+		reason := ""
+		if !ok {
+			reason = "height_mismatch"
+		}
+
+		commitRoot, commitHeight, commitOK := eng.LatestCommitRoot()
+		if !commitOK {
+			ok = false
+			reason = "commit_root_unavailable"
+		}
+
+		header, headerOK := eng.LatestEternityHeader()
+		if !headerOK {
+			ok = false
+			reason = "header_unavailable"
+		}
+
+		validatorsRootOK := true
+		var validatorsRoot [32]byte
+		if headerOK {
+			validatorsRoot = header.ProposerSetHash
+			if scores, err := eng.ListValidatorScores(); err == nil {
+				computed := validators.ComputeValidatorsRoot(scores)
+				if computed != header.ProposerSetHash {
+					ok = false
+					reason = "validators_root_mismatch"
+					validatorsRootOK = false
+				}
+			} else {
+				ok = false
+				reason = "validator_state_unavailable"
+				validatorsRootOK = false
+			}
+		}
+
+		if commitOK && headerOK && header.CommitHash != commitRoot {
+			ok = false
+			reason = "commit_root_mismatch"
+		}
+
+		resp := map[string]any{
+			"ok":                 ok,
+			"reason":             reason,
+			"height":             h,
+			"receipts_count":     receiptCount,
+			"commit_root_height": commitHeight,
+			"time_utc":           time.Now().UTC().Format(time.RFC3339),
+		}
+		if commitOK {
+			resp["commit_root_hex"] = hex.EncodeToString(commitRoot[:])
+		}
+		if headerOK {
+			resp["header_commit_root_hex"] = hex.EncodeToString(header.CommitHash[:])
+		}
+		if validatorsRootOK {
+			resp["validators_root_hex"] = hex.EncodeToString(validatorsRoot[:])
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+
+	// Account
 	mux.HandleFunc("/account/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -257,7 +429,7 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 		})
 	})
 
-	// --- Nonce ---
+	// Nonce
 	mux.HandleFunc("/nonce/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -271,7 +443,7 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 		})
 	})
 
-	// --- Merkle ---
+	// Merkle
 	mux.HandleFunc("/merkle", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -285,59 +457,53 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 		})
 	})
 
-	// --- TX 조회: GET /tx/{hash} ---
-	mux.HandleFunc("/tx-disabled/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
+	// Supply snapshot
+	supplyToJSON := func(st app.SupplyState, minted uint64) map[string]any {
+		return map[string]any{
+			"height":               st.LastUpdatedHeight,
+			"total_minted_mas":     st.TotalMintedMas,
+			"network_vault_mas":    st.NetworkVaultMas,
+			"foundation_vault_mas": st.FoundationVaultMas,
+			"exchange_vault_mas":   st.ExchangeVaultMas,
+			"block_mint_mas":       minted,
 		}
-		h := strings.TrimPrefix(r.URL.Path, "/tx/")
-		w.Header().Set("Content-Type", "application/json")
-		if h == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "bad_hash"})
-			return
-		}
-		rec, ok := eng.GetReceipt(h)
-		if !ok {
-			w.WriteHeader(http.StatusNotFound)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not_found"})
-			return
-		}
-		_ = json.NewEncoder(w).Encode(rec)
-	})
+	}
 
-	// --- Supply snapshot ---
 	mux.HandleFunc("/supply/current", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		aF := eng.GetAccount("tho1foundation")
-		aX := eng.GetAccount("tho1exchange")
-		aA := eng.GetAccount("tho1alice")
-		aB := eng.GetAccount("tho1bob")
-		totalMas := aA.Balance + aB.Balance + aF.Balance + aX.Balance
-		format := func(m uint64) map[string]any {
-			return map[string]any{
-				"tho":       m / masPerTHO,
-				"mas":       m % masPerTHO,
-				"mas_total": m,
-				"display":   strconv.FormatUint(m/masPerTHO, 10) + " THO " + strconv.FormatUint(m%masPerTHO, 10) + " mas",
-			}
-		}
-		network := totalMas - aF.Balance - aX.Balance
+		st := eng.CurrentSupply()
+		minted := rewards.BlockMintAt(st.LastUpdatedHeight)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"unit":       "mas",
-			"foundation": format(aF.Balance),
-			"exchange":   format(aX.Balance),
-			"network":    format(network),
-			"total":      format(totalMas),
-		})
+		_ = json.NewEncoder(w).Encode(supplyToJSON(st, minted))
 	})
 
-	// --- Minting (라이트) ---
+	mux.HandleFunc("/supply/at/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		heightStr := strings.TrimPrefix(r.URL.Path, "/supply/at/")
+		height, err := strconv.ParseUint(heightStr, 10, 64)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "bad_height"})
+			return
+		}
+		st, ok := eng.SupplyAt(height)
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not_found"})
+			return
+		}
+		minted := rewards.BlockMintAt(height)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(supplyToJSON(st, minted))
+	})
+
+	// Minting (light)
 	mux.HandleFunc("/minting", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -367,7 +533,7 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 		})
 	})
 
-	// --- Rounds ---
+	// Rounds
 	mux.HandleFunc("/round/commit", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -453,6 +619,177 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 
 		w.WriteHeader(http.StatusNotFound)
 	})
+	mux.HandleFunc("/eternity/header/latest", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		h, ok := eng.LatestEternityHeader()
+		w.Header().Set("Content-Type", "application/json")
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "no_header"})
+			return
+		}
+		blockID := h.BlockID()
+		resp := map[string]any{
+			"chain_id":       h.ChainID,
+			"height":         h.Height,
+			"round":          h.Round,
+			"timestamp":      h.Timestamp,
+			"emission_epoch": h.EmissionEpoch,
+			"prev_hash":      hex.EncodeToString(h.PrevHash[:]),
+			"state_root":     hex.EncodeToString(h.StateRoot[:]),
+			"tx_root":        hex.EncodeToString(h.TxRoot[:]),
+			"evidence_root":  hex.EncodeToString(h.EvidenceRoot[:]),
+			"proposer_key":   hex.EncodeToString(h.ProposerKey[:]),
+			"proposer_set":   hex.EncodeToString(h.ProposerSetHash[:]),
+			"commit_hash":    hex.EncodeToString(h.CommitHash[:]),
+			"flags":          h.Flags,
+			"signature_hex":  hex.EncodeToString(h.Signature),
+			"block_id_hex":   hex.EncodeToString(blockID[:]),
+			"algo":           "ed25519",
+			"pubkey_hex":     hex.EncodeToString(h.ProposerKey[:]),
+		}
+		if h.Commit.Height != 0 || len(h.Commit.Signatures) > 0 {
+			commit := map[string]any{
+				"height": h.Commit.Height,
+				"round":  h.Commit.Round,
+			}
+			if h.Commit.BlockID != ([32]byte{}) {
+				commit["block_id_hex"] = hex.EncodeToString(h.Commit.BlockID[:])
+			}
+			if len(h.Commit.Signatures) > 0 {
+				commit["signature_count"] = len(h.Commit.Signatures)
+			}
+			resp["commit"] = commit
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+
+	mux.HandleFunc("/block/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if !strings.HasSuffix(r.URL.Path, "/light-proof") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		trimmed := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/block/"), "/light-proof")
+		height, err := strconv.ParseUint(trimmed, 10, 64)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "bad_height"})
+			return
+		}
+
+		header, ok := eng.EternityHeaderAt(height)
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not_found"})
+			return
+		}
+
+		bundle, ok := eng.CommitBundleAt(height)
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "commit_not_found"})
+			return
+		}
+		commitMap := map[string]any{
+			"height":          bundle.Height,
+			"round":           bundle.Round,
+			"block_id_hex":    hex.EncodeToString(bundle.BlockID[:]),
+			"signature_count": len(bundle.Signatures),
+		}
+		if len(bundle.Signatures) > 0 {
+			sigs := make([]map[string]any, len(bundle.Signatures))
+			for i, sig := range bundle.Signatures {
+				sigs[i] = map[string]any{
+					"validator_index": sig.ValidatorIndex,
+					"step":            sig.Step,
+					"pub_key_hex":     hex.EncodeToString(sig.PublicKey),
+					"signature_hex":   hex.EncodeToString(sig.Signature),
+				}
+			}
+			commitMap["signatures"] = sigs
+		}
+
+		headerBlockID := header.BlockID()
+		headerMap := map[string]any{
+			"chain_id":       header.ChainID,
+			"height":         header.Height,
+			"round":          header.Round,
+			"timestamp":      header.Timestamp,
+			"emission_epoch": header.EmissionEpoch,
+			"prev_hash":      hex.EncodeToString(header.PrevHash[:]),
+			"state_root":     hex.EncodeToString(header.StateRoot[:]),
+			"tx_root":        hex.EncodeToString(header.TxRoot[:]),
+			"evidence_root":  hex.EncodeToString(header.EvidenceRoot[:]),
+			"proposer_key":   hex.EncodeToString(header.ProposerKey[:]),
+			"proposer_set":   hex.EncodeToString(header.ProposerSetHash[:]),
+			"commit_hash":    hex.EncodeToString(header.CommitHash[:]),
+			"flags":          header.Flags,
+			"signature_hex":  hex.EncodeToString(header.Signature),
+			"block_id_hex":   hex.EncodeToString(headerBlockID[:]),
+			"algo":           "ed25519",
+			"pubkey_hex":     hex.EncodeToString(header.ProposerKey[:]),
+		}
+
+		resp := map[string]any{
+			"header":              headerMap,
+			"commit_bundle":       commitMap,
+			"commit_root_hex":     hex.EncodeToString(header.CommitHash[:]),
+			"validators_root_hex": hex.EncodeToString(header.ProposerSetHash[:]),
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+
+	mux.HandleFunc("/block/light-verify", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		defer r.Body.Close()
+		var payload struct {
+			Header            types.EternityHeader `json:"header"`
+			CommitBundle      types.CommitBundle   `json:"commit_bundle"`
+			ValidatorsRootHex string               `json:"validators_root_hex"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "decode_error"})
+			return
+		}
+
+		rootBytes, err := hex.DecodeString(payload.ValidatorsRootHex)
+		if err != nil || len(rootBytes) != 32 {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "bad_validators_root"})
+			return
+		}
+		var rootArr [32]byte
+		copy(rootArr[:], rootBytes)
+
+		proof := light.Proof{
+			Header:         &payload.Header,
+			CommitBundle:   &payload.CommitBundle,
+			ValidatorsRoot: rootArr,
+		}
+		if err := light.Verify(proof); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	})
+
 	mux.HandleFunc("/round/latest/signed", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -479,151 +816,394 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 		})
 	})
 
-	// --- TX 제출: POST /tx ---
-	mux.HandleFunc("/tx", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-
-		// 디버그 숏컷
-		if r.URL.Query().Get("debug") == "ping" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "reason": "ping"})
-			return
-		}
-
-		b, _ := io.ReadAll(r.Body)
-		ct := strings.ToLower(r.Header.Get("Content-Type"))
-		if strings.Contains(r.URL.RawQuery, "debuglog=1") {
-			log.Printf("/tx recv ct=%q len=%d", ct, len(b))
-		} // 디버그: 파싱 스킵 (절대 블로킹 금지)
-		if r.URL.Query().Get("debug") == "skipapply" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"status":  "queued",
-				"parsed":  false,
-				"ok":      true,
-				"applied": false,
-				"reason":  "skipapply",
-				"len":     len(b),
-				"ct":      ct,
-			})
-			return
-		}
-
-		var t tx.Transfer
-		var parseErr error
-		switch {
-		case strings.HasPrefix(ct, "application/cbor"):
-			parseErr = codec.DecodeCBOR(b, &t)
-		case strings.HasPrefix(ct, "application/json"), len(b) > 0 && (b[0] == '{' || b[0] == '['):
-			parseErr = codec.DecodeJSON(b, &t)
-		default:
-			parseErr = io.EOF
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if parseErr != nil {
-			_ = json.NewEncoder(w).Encode(map[string]any{"status": "queued", "parsed": false, "error": parseErr.Error()})
-			return
-		}
-
-		ok := t.Type == 1 && t.AmountMas > 0
-		reason := ""
-
-		// 체인ID
-		if t.ChainID != allowedChainID {
-			ok = false
-			reason = "bad_chain_id"
-		}
-
-		// 수수료(0.1%, 최소 1 mas)
-		expFeeMas := (t.AmountMas * feeBPS) / 10000
-		if expFeeMas < 1 {
-			expFeeMas = 1
-		}
-		if t.FeeMas != expFeeMas {
-			ok = false
-			if reason == "" {
-				reason = "bad_fee"
-			}
-		}
-
-		// msg_commitment 길이
-		if len(t.MsgCommit) > maxMsgCommitLen {
-			ok = false
-			if reason == "" {
-				reason = "msg_commitment_too_large"
-			}
-		}
-
-		// 만료
-		curH := eng.CurrentHeight()
-		if t.ExpiryHeight > 0 && curH >= t.ExpiryHeight {
-			ok = false
-			if reason == "" {
-				reason = "expired"
-			}
-		}
-
-		// 타입/금액 0 체크
-		if t.Type != 1 {
-			ok = false
-			if reason == "" {
-				reason = "bad_type"
-			}
-		}
-		if t.AmountMas == 0 {
-			ok = false
-			if reason == "" {
-				reason = "zero_amount"
-			}
-		}
-
-		// 논스 힌트
-		fromAcc := eng.GetAccount(t.From)
-		currentNonce := fromAcc.Nonce
-		expectedNonce := currentNonce + 1
-
-		applied := false
-		if ok {
-			if err := eng.ApplyTransfer(t); err != nil {
-				reason = "apply:" + err.Error()
-			} else {
-				applied = true
-			}
-		}
-
-		rec := eng.StoreReceipt(t, applied, reason)
-
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status": "queued", "parsed": true, "ok": ok, "applied": applied, "reason": reason,
-			"tx_hash": rec.TxHash, "from": rec.From, "to": rec.To,
-			"amount_mas": rec.Amount, "fee_mas": rec.Fee,
-			"amount": rec.Amount / masPerMicro, "fee": rec.Fee / masPerMicro,
-			"nonce": rec.Nonce, "height": rec.Height, "time_utc": rec.TimeUTC,
-			"current_nonce": currentNonce, "expected_nonce": expectedNonce,
-			"expected_fee_mas": expFeeMas, "root_deferred": true,
-			"receipts_count": eng.ReceiptCount(),
-		})
-	})
-
-	// GET /stats : 러닝 상태 요약
-	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+	// ----------------------
+	// Alias API (reflective)
+	// ----------------------
+	mux.HandleFunc("/alias/resolve", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing_name"})
+			return
+		}
+		rec, ok := callEngResolveAlias(eng, name)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"height":         eng.CurrentHeight(),
-			"receipts_count": eng.ReceiptCount(),
-			"time_utc":       time.Now().UTC().Format(time.RFC3339),
-		})
+		if !ok {
+			if rec == nil {
+				w.WriteHeader(http.StatusNotImplemented)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "not_implemented"})
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not_found"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "record": rec})
 	})
 
-	// AUTO: /stats.json(JSON)
+	mux.HandleFunc("/alias/reverse", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		addr := r.URL.Query().Get("addr")
+		if addr == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "missing_addr"})
+			return
+		}
+		name, implemented, found := callEngReverseAlias(eng, addr)
+		w.Header().Set("Content-Type", "application/json")
+		if !implemented {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not_implemented"})
+			return
+		}
+		if !found {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not_found"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "alias": name})
+	})
+
+	// ----------------------
+	// R2P endpoints
+	// ----------------------
+
+	// 목록 (updated desc, id desc / opaque cursor: base64url("ts|id"))
+	mux.HandleFunc("/r2p/list", r2pListHandlerOpaque)
+
+	// tx lookup (by hash) — both /tx and /tx/get support ?hash=...
+	mux.HandleFunc("/tx", txGetHandler)
+	mux.HandleFunc("/tx/get", txGetHandler)
+
+	// wallet
+	mux.HandleFunc("/wallet/create", walletCreateHandler)
+	mux.HandleFunc("/wallet/restore", walletRestoreHandler)
+
+	// 생성
+	mux.HandleFunc("/r2p/create", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if os.Getenv("THOMAS_FEAT_R2P") != "1" {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not_implemented"})
+			return
+		}
+		var in struct {
+			From      string `json:"from"` // payee
+			To        string `json:"to"`   // payer
+			AmountMas int64  `json:"amount_mas"`
+			Memo      string `json:"memo"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &in); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "bad_json"})
+			return
+		}
+		payeeAddr, aliasNorm, aliasVer, ok1 := resolveAddressMaybeAlias(eng, in.From)
+		payerAddr, _, _, ok2 := resolveAddressMaybeAlias(eng, in.To)
+		if !ok1 || !ok2 || in.AmountMas <= 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "bad_params"})
+			return
+		}
+
+		r2pMu.Lock()
+		id := genR2PID()
+		rec := &r2pRecord{
+			ID:         id,
+			From:       payeeAddr,
+			To:         payerAddr,
+			AmountMas:  uint64(in.AmountMas),
+			Memo:       in.Memo,
+			CreatedUTC: time.Now().UTC().Unix(),
+			Status:     "open",
+		}
+		if aliasNorm != "" {
+			rec.Alias = aliasNorm
+			rec.AliasVersion = aliasVer
+		}
+		r2pStore[id] = rec
+		r2pSaveLocked()
+		r2pMu.Unlock()
+
+		saveR2P()
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "id": id})
+	})
+
+	// 단건 조회
+	mux.HandleFunc("/r2p/get", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "missing_id"})
+			return
+		}
+		r2pMu.Lock()
+		rec, ok := r2pStore[id]
+		r2pMu.Unlock()
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "not_found"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "record": rec})
+	})
+
+	// 승인 → 체인 송금
+	mux.HandleFunc("/r2p/approve", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if os.Getenv("THOMAS_FEAT_R2P") != "1" {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not_implemented"})
+			return
+		}
+
+		var in struct {
+			ID     string `json:"id"`
+			Payer  string `json:"payer"`   // optional
+			FeeMas int64  `json:"fee_mas"` // optional
+		}
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &in); err != nil || in.ID == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "bad_json"})
+			return
+		}
+
+		// 레코드 조회(락 없이 조회만)
+		r2pMu.Lock()
+		rec, ok := r2pStore[in.ID]
+		r2pMu.Unlock()
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not_found"})
+			return
+		}
+		if rec.Status != "open" {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok": true, "id": rec.ID, "status": rec.Status, "tx_hash": rec.TxHash,
+			})
+			return
+		}
+
+		payer := strings.TrimSpace(in.Payer)
+		if payer == "" {
+			payer = rec.To
+		}
+		payerAddr, err := resolveAddrMaybeAlias(eng, payer)
+		if err != nil || payerAddr != rec.To {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "payer_mismatch"})
+			return
+		}
+
+		fee := in.FeeMas
+		if fee <= 0 {
+			fee = int64(minFeeMas(rec.AmountMas, feeBps))
+		}
+		acc := eng.GetAccount(payerAddr)
+		nonce := acc.Nonce + 1
+
+		t := tx.Transfer{
+			Type:         1,
+			From:         payerAddr,
+			To:           rec.From,
+			AmountMas:    rec.AmountMas,
+			FeeMas:       uint64(fee),
+			Nonce:        nonce,
+			ChainID:      expectedChainID,
+			ExpiryHeight: 0,
+		}
+
+		// 실제 적용 시도
+		if err := eng.ApplyTransfer(t); err != nil {
+			reason := "apply:" + err.Error()
+
+			// === DEV 우회: 로컬요청 + ENV 허용 + 잔고부족일 때 paid 처리 ===
+			if devFreeR2PEnabled(r) && isInsufficientFunds(err, reason) {
+				now := time.Now().UTC().Unix()
+				r2pMu.Lock()
+				rec.Status = "paid"
+				rec.PaidUTC = now
+				rec.TxHash = "dev-" + rec.ID
+				r2pStore[in.ID] = rec
+				r2pSaveLocked()
+				r2pMu.Unlock()
+
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "id": rec.ID, "tx_hash": rec.TxHash})
+				return
+			}
+
+			// === /DEV 우회 ===
+
+			rc := eng.StoreReceipt(t, false, reason)
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": reason, "receipt": rc})
+			return
+		}
+
+		// 정상 적용됨 → 영수증 저장
+		rc := eng.StoreReceipt(t, true, "")
+
+		// 레코드 갱신(+영속) — 반드시 락 안에서 저장까지
+		now := time.Now().UTC().Unix()
+		r2pMu.Lock()
+		rec.Status = "paid"
+		rec.PaidUTC = now
+		rec.TxHash = rc.TxHash
+		r2pStore[in.ID] = rec
+		r2pSaveLocked()
+		r2pMu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "id": rec.ID, "tx_hash": rc.TxHash})
+	})
+
+	// 거절
+	mux.HandleFunc("/r2p/decline", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if os.Getenv("THOMAS_FEAT_R2P") != "1" {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not_implemented"})
+			return
+		}
+		var in struct {
+			ID    string `json:"id"`
+			Payer string `json:"payer"` // optional
+		}
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &in); err != nil || in.ID == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "bad_json"})
+			return
+		}
+
+		r2pMu.Lock()
+		rec, ok := r2pStore[in.ID]
+		r2pSaveLocked()
+		r2pMu.Unlock()
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not_found"})
+			return
+		}
+		if rec.Status != "open" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok": true, "id": rec.ID, "status": rec.Status, "tx_hash": rec.TxHash,
+			})
+			return
+		}
+
+		payer := strings.TrimSpace(in.Payer)
+		if payer == "" {
+			payer = rec.To
+		}
+		payerAddr, err := resolveAddrMaybeAlias(eng, payer)
+		if err != nil || payerAddr != rec.To {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "payer_mismatch"})
+			return
+		}
+
+		r2pMu.Lock()
+		rec.Status = "declined"
+		rec.DeclinedUTC = time.Now().UTC().Unix()
+		rec.TxHash = ""
+		r2pMu.Unlock()
+		saveR2P()
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "id": rec.ID, "status": rec.Status})
+	})
+
+	// 취소
+	mux.HandleFunc("/r2p/cancel", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if os.Getenv("THOMAS_FEAT_R2P") != "1" {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not_implemented"})
+			return
+		}
+		var in struct {
+			ID    string `json:"id"`
+			Payee string `json:"payee"` // optional
+		}
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &in); err != nil || in.ID == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "bad_json"})
+			return
+		}
+
+		r2pMu.Lock()
+		rec, ok := r2pStore[in.ID]
+		r2pSaveLocked()
+		r2pMu.Unlock()
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not_found"})
+			return
+		}
+		if rec.Status != "open" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok": true, "id": rec.ID, "status": rec.Status, "tx_hash": rec.TxHash,
+			})
+			return
+		}
+
+		payee := strings.TrimSpace(in.Payee)
+		if payee == "" {
+			payee = rec.From
+		}
+		payeeAddr, err := resolveAddrMaybeAlias(eng, payee)
+		if err != nil || payeeAddr != rec.From {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "payee_mismatch"})
+			return
+		}
+
+		r2pMu.Lock()
+		rec.Status = "canceled"
+		rec.CanceledUTC = time.Now().UTC().Unix()
+		rec.TxHash = ""
+		r2pMu.Unlock()
+		saveR2P()
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "id": rec.ID, "status": rec.Status})
+	})
+
+	// Stats
 	mux.HandleFunc("/stats.json", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -636,8 +1216,6 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 			"time_utc":       time.Now().UTC().Format(time.RFC3339),
 		})
 	})
-
-	// AUTO: /stats.sys (system metrics)
 	mux.HandleFunc("/stats.sys", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -657,10 +1235,7 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 		})
 	})
 
-	// AUTO: /stats.plus — base + optional extras via reflection
-	// AUTO: /metrics — minimal Prometheus text exposition
-
-	// AUTO: /stats.plus — base + optional extras via reflection (extended)
+	// Stats+
 	mux.HandleFunc("/stats.plus", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -668,8 +1243,6 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 		}
 		extras := map[string]any{}
 		rv := reflect.ValueOf(eng)
-
-		// helpers
 		call0 := func(name string) (any, bool) {
 			m := rv.MethodByName(name)
 			if !m.IsValid() || m.Type().NumIn() != 0 || m.Type().NumOut() == 0 {
@@ -678,7 +1251,6 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 			outs := m.Call(nil)
 			return outs[0].Interface(), true
 		}
-		// try multiple name variants
 		tryNames := func(names ...string) (any, bool) {
 			for _, n := range names {
 				if v, ok := call0(n); ok {
@@ -687,7 +1259,6 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 			}
 			return nil, false
 		}
-
 		if v, ok := tryNames("MerkleRoot", "TxRoot"); ok {
 			extras["tx_root"] = v
 		}
@@ -712,11 +1283,11 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 		for k, v := range extras {
 			resp[k] = v
 		}
-
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	})
-	// AUTO: /metrics — Prometheus text (extended if available)
+
+	// Metrics
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -724,8 +1295,6 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 		}
 		var ms runtime.MemStats
 		runtime.ReadMemStats(&ms)
-
-		// optional via reflection
 		var mempool int64 = -1
 		if v := reflect.ValueOf(eng).MethodByName("MempoolSize"); v.IsValid() && v.Type().NumIn() == 0 && v.Type().NumOut() > 0 {
 			mv := v.Call(nil)[0]
@@ -741,7 +1310,6 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 				mempool = mv.Int()
 			}
 		}
-
 		var validators int64 = -1
 		if v := reflect.ValueOf(eng).MethodByName("ValidatorsLen"); v.IsValid() && v.Type().NumIn() == 0 && v.Type().NumOut() > 0 {
 			mv := v.Call(nil)[0]
@@ -749,7 +1317,6 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 				validators = mv.Int()
 			}
 		}
-
 		fmt.Fprintf(w, "# TYPE thomas_height gauge\nthomas_height %d\n", eng.CurrentHeight())
 		fmt.Fprintf(w, "# TYPE thomas_receipts_total counter\nthomas_receipts_total %d\n", eng.ReceiptCount())
 		fmt.Fprintf(w, "# TYPE thomas_uptime_seconds gauge\nthomas_uptime_seconds %d\n", int64(time.Since(bootTime).Seconds()))
@@ -768,7 +1335,7 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 		}
 	})
 
-	// AUTO: /readyz — readiness probe (net/http)
+	// Readiness
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -789,6 +1356,7 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 		_ = json.NewEncoder(w).Encode(resp)
 	})
 
+	// Version
 	mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{
@@ -801,54 +1369,322 @@ if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 		})
 	})
 
-	// AUTO: rate limit status
-	mux.HandleFunc("/ratelimit.debuglog", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
+	// Panic-safe round commit (원본 유지 + safe2 제공)
+	mux.HandleFunc("/round/commit_safe", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		dbgMu.Lock()
-		cap := dbgCap
-		tokens := dbgTokens
-		rps := dbgRefillPerSec
-		dbgMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"capacity":       cap,
-			"refill_per_sec": rps,
-			"tokens":         tokens,
-			"time_utc":       time.Now().UTC().Format(time.RFC3339),
-		})
+		{
+			rc := eng.ReceiptCount()
+			hh := eng.CurrentHeight()
+			if rc >= 0 {
+				if int64(hh) > int64(rc) {
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"committed": false,
+						"reason":    fmt.Sprintf("inconsistent_state: height=%d receipts_count=%d", hh, rc),
+					})
+					return
+				}
+			}
+		}
+		defer func() {
+			if rec := recover(); rec != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"committed": false,
+					"reason":    fmt.Sprintf("engine.CommitRound panic: %v", rec),
+				})
+			}
+		}()
+		hdr, ok := eng.CommitRound()
+		if !ok {
+			_ = json.NewEncoder(w).Encode(map[string]any{"committed": false, "reason": "no_pending"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"committed": true, "header": hdr})
 	})
-	return debuglogRateLimit(txPrecheckWith(precheckSig(precheckFromBinding(precheckCommit(mux))), func() int64 { return int64(eng.CurrentHeight()) }))
+	mux.HandleFunc("/round/commit_safe2", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+
+		hasPending := func() (bool, bool) {
+			rv := reflect.ValueOf(eng)
+			tryCount := func(name string) (bool, bool) {
+				m := rv.MethodByName(name)
+				if !m.IsValid() || m.Type().NumIn() != 0 || m.Type().NumOut() == 0 {
+					return false, false
+				}
+				out := m.Call(nil)[0]
+				switch out.Kind() {
+				case reflect.Int, reflect.Int32, reflect.Int64:
+					return true, out.Int() > 0
+				case reflect.Uint, reflect.Uint32, reflect.Uint64:
+					return true, out.Uint() > 0
+				case reflect.Bool:
+					return true, out.Bool()
+				default:
+					return true, true
+				}
+			}
+			if ok, v := tryCount("PendingCount"); ok {
+				return true, v
+			}
+			if ok, v := tryCount("BacklogSize"); ok {
+				return true, v
+			}
+			if ok, v := tryCount("MempoolSize"); ok {
+				return true, v
+			}
+			if ok, v := tryCount("MempoolLen"); ok {
+				return true, v
+			}
+			return false, true
+		}
+		if impl, pend := hasPending(); impl && !pend {
+			_ = json.NewEncoder(w).Encode(map[string]any{"committed": false, "reason": "no_pending"})
+			return
+		}
+
+		{
+			rc := eng.ReceiptCount()
+			hh := eng.CurrentHeight()
+			if rc >= 0 {
+				if int64(hh) > int64(rc) {
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"committed": false,
+						"reason":    fmt.Sprintf("inconsistent_state: height=%d receipts_count=%d", hh, rc),
+					})
+					return
+				}
+			}
+		}
+		defer func() {
+			if rec := recover(); rec != nil {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"committed": false,
+					"reason":    fmt.Sprintf("engine.CommitRound panic: %v", rec),
+				})
+			}
+		}()
+
+		hdr, ok := eng.CommitRound()
+		if !ok {
+			_ = json.NewEncoder(w).Encode(map[string]any{"committed": false, "reason": "no_pending"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"committed": true, "header": hdr})
+	})
+
+	// ===== 미들웨어 체인 (루트 핸들러 교체) =====
+	root = debuglogRateLimit(
+		txPrecheckWith(
+			precheckSig(
+				precheckFromBindingWith(eng)(
+					precheckCommit(mux),
+				),
+			),
+			func() int64 { return int64(eng.CurrentHeight()) },
+		),
+	)
 }
 
-// (옵션) SSE용 인터페이스
-type sseAdapter interface {
-	SubscribeForSSE() chan []byte
-	UnsubscribeForSSE(ch chan []byte)
-}
+// ============================
+// 구현 세부: r2p 목록(opaque cursor)
+// ============================
 
-//// === AUTO: MISSING PRECHECKS (safe minimal) ===
-
-var expectedChainID = func() string {
-	if v := os.Getenv("THOMAS_CHAIN_ID"); v != "" {
-		return v
+// 리스트 핸들러 교체본
+func r2pListHandlerOpaque(w http.ResponseWriter, r *http.Request) {
+	// allowCORS(w, r)
+	// if r.Method == http.MethodOptions {
+	//	w.WriteHeader(http.StatusNoContent)
+	// 	return
+	// }
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
 	}
-	return "thomas-dev-1"
-}()
-var feeBps = func() int {
-	if v := os.Getenv("THOMAS_FEE_BPS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
+	if os.Getenv("THOMAS_FEAT_R2P") != "1" {
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "not_implemented"})
+		return
+	}
+
+	owner := strings.TrimSpace(r.URL.Query().Get("owner"))
+	if owner == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "missing_owner"})
+		return
+	}
+	ownerAddr, _, _, ok := resolveAddressMaybeAlias(eng, owner)
+	if !ok {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "bad_owner"})
+		return
+	}
+
+	role := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("role")))
+	if role == "" {
+		// 기존 호환성: 기본 outbox
+		role = "outbox"
+	}
+	if role != "outbox" && role != "inbox" && role != "all" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "bad_role"})
+		return
+	}
+
+	// state/status 처리 (둘 다 오면 에러)
+	state := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("state")))
+	status := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
+	if state != "" && status != "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "conflicting_state_status"})
+		return
+	}
+	normalizeStatus := func(s string) (string, bool) {
+		switch s {
+		case "open", "paid", "declined", "canceled":
+			return s, true
+		case "approved": // 흔한 별칭 → paid
+			return "paid", true
+		default:
+			return "", false
 		}
 	}
-	return 0
-}()
+
+	wantStatus := ""
+	if status != "" {
+		if ws, ok := normalizeStatus(status); ok {
+			wantStatus = ws
+		} else {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "bad_status"})
+			return
+		}
+	} else if state != "" {
+		if state == "all" {
+			wantStatus = ""
+		} else if ws, ok := normalizeStatus(state); ok {
+			wantStatus = ws
+		} else {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "bad_state"})
+			return
+		}
+	} else {
+		// 기존 호환성: 기본 open만
+		wantStatus = "open"
+	}
+
+	// 추가 from/to 필터 (별칭 허용)
+	fromFilter := ""
+	if v := strings.TrimSpace(r.URL.Query().Get("from")); v != "" {
+		if addr, _, _, ok := resolveAddressMaybeAlias(eng, v); ok {
+			fromFilter = addr
+		} else {
+			fromFilter = v
+		}
+	}
+	toFilter := ""
+	if v := strings.TrimSpace(r.URL.Query().Get("to")); v != "" {
+		if addr, _, _, ok := resolveAddressMaybeAlias(eng, v); ok {
+			toFilter = addr
+		} else {
+			toFilter = v
+		}
+	}
+
+	// 수집 + 필터
+	r2pMu.Lock()
+	out := make([]*r2pRecord, 0, len(r2pStore))
+	for _, rec := range r2pStore {
+		// role
+		if role == "outbox" && rec.From != ownerAddr {
+			continue
+		}
+		if role == "inbox" && rec.To != ownerAddr {
+			continue
+		}
+		if role == "all" && !(rec.From == ownerAddr || rec.To == ownerAddr) {
+			continue
+		}
+
+		// status
+		if wantStatus != "" && rec.Status != wantStatus {
+			continue
+		}
+
+		// from/to 추가 필터
+		if fromFilter != "" && rec.From != fromFilter {
+			continue
+		}
+		if toFilter != "" && rec.To != toFilter {
+			continue
+		}
+
+		out = append(out, rec)
+	}
+	r2pMu.Unlock()
+
+	// 최신순 정렬 (created_utc가 있다면)
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedUTC > out[j].CreatedUTC
+	})
+
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "records": out})
+}
+
+// ============================
+// Precheck / helpers (기존 유지)
+// ============================
+
+type bufferingWriter struct {
+	header http.Header
+	body   bytes.Buffer
+	status int
+}
+
+func (bw *bufferingWriter) Header() http.Header { return bw.header }
+
+func (bw *bufferingWriter) Write(b []byte) (int, error) {
+	if bw.status == 0 {
+		bw.status = http.StatusOK
+	}
+	return bw.body.Write(b)
+}
+
+func (bw *bufferingWriter) WriteHeader(status int) {
+	bw.status = status
+}
+
+func copyHeader(dst, src http.Header) {
+	for k, vals := range src {
+		for _, v := range vals {
+			dst.Add(k, v)
+		}
+	}
+}
+
+type txPre struct {
+	Type          int    `json:"type"`
+	From          string `json:"from"`
+	To            string `json:"to"`
+	AmountMas     int64  `json:"amount_mas"`
+	FeeMas        int64  `json:"fee_mas"`
+	Nonce         int64  `json:"nonce"`
+	ChainID       string `json:"chain_id"`
+	ExpiryHeight  int64  `json:"expiry_height"`
+	MsgCommitment string `json:"msg_commitment"`
+	Sig           string `json:"sig,omitempty"`
+}
 
 func txPrecheckWith(next http.Handler, getHeight func() int64) http.Handler {
 	next = jsonizeSigErrors(next)
-
 	next = withJSONErrorFallback(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/tx" {
@@ -867,7 +1703,12 @@ func txPrecheckWith(next http.Handler, getHeight func() int64) http.Handler {
 			if in.AmountMas <= 0 {
 				errs = append(errs, "amount_le_0")
 			}
-			expFee := minFeeMas(in.AmountMas, feeBps)
+			expFee := int64(minFeeMas(func() uint64 {
+				if in.AmountMas > 0 {
+					return uint64(in.AmountMas)
+				}
+				return 1
+			}(), feeBps))
 			if in.FeeMas < expFee {
 				errs = append(errs, "fee_below_min")
 			}
@@ -875,15 +1716,19 @@ func txPrecheckWith(next http.Handler, getHeight func() int64) http.Handler {
 				errs = append(errs, "addr_format")
 			}
 			h := getHeight()
-			if in.ExpiryHeight > 0 && in.ExpiryHeight <= h {
+			if in.ExpiryHeight > 0 && uint64(in.ExpiryHeight) <= uint64(h) {
 				errs = append(errs, "expired_height")
 			}
 			if len(errs) > 0 {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
 				_ = json.NewEncoder(w).Encode(map[string]any{
-					"ok": false, "reason": "tx_precheck_failed", "errors": errs,
-					"expected_fee_mas": expFee, "expected_chain_id": expectedChainID, "current_height": h,
+					"ok":                false,
+					"errors":            errs,
+					"reason":            "tx_precheck_failed",
+					"expected_fee_mas":  expFee,
+					"expected_chain_id": expectedChainID,
+					"current_height":    h,
 				})
 				return
 			}
@@ -918,7 +1763,7 @@ func precheckCommit(next http.Handler) http.Handler {
 					_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "reason": "commitment_required", "expected_message": expected})
 					return
 				}
-			} else if in.MsgCommitment != expected {
+			} else if must && in.MsgCommitment != expected {
 				w.WriteHeader(http.StatusBadRequest)
 				_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "reason": "bad_commitment", "expected_message": expected})
 				return
@@ -973,37 +1818,374 @@ func precheckSig(next http.Handler) http.Handler {
 	})
 }
 
-//// === END AUTO ===
-//
-// withHealthPolicy adds GET /health and GET /policy without touching existing routes.
-func withHealthPolicy(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        if r.Method == http.MethodGet && r.URL.Path == "/health" {
-            w.Header().Set("Content-Type", "application/json")
-            _ = json.NewEncoder(w).Encode(map[string]any{
-                "status":   "ok",
-                "time_utc": time.Now().UTC().Format(time.RFC3339),
-            })
-            return
-        }
-        if r.Method == http.MethodGet && r.URL.Path == "/policy" {
-            w.Header().Set("Content-Type", "application/json")
-            _ = json.NewEncoder(w).Encode(map[string]any{
-                "ok":     true,
-                "strict": os.Getenv("THOMAS_VERIFY_SIG") == "1",
-            })
-            return
-        }
-        next.ServeHTTP(w, r)
-    })
+func withJSONErrorFallback(next http.Handler) http.Handler { return next }
+func jsonizeSigErrors(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cap := &bufferingWriter{header: make(http.Header)}
+		next.ServeHTTP(cap, r)
+
+		reason := ""
+		rewrite := false
+
+		if cap.status == http.StatusBadRequest {
+			reason = "verify:bad_signature"
+			rewrite = true
+		} else if cap.status == 0 {
+			cap.status = http.StatusOK
+		}
+
+		if reason == "" {
+			var parsed map[string]any
+			if err := json.Unmarshal(cap.body.Bytes(), &parsed); err == nil {
+				if v, ok := parsed["reason"].(string); ok && v == "verify:bad_signature" {
+					reason = v
+					if okVal, ok := parsed["ok"].(bool); !ok || okVal != true {
+						rewrite = true
+					}
+					if applied, ok := parsed["applied"].(bool); !ok || applied != false {
+						rewrite = true
+					}
+				}
+			}
+		}
+
+		if reason != "" {
+			incBadSigJSON()
+		}
+
+		if rewrite {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "applied": false, "reason": reason})
+			return
+		}
+
+		copyHeader(w.Header(), cap.header)
+		if cap.status != 0 {
+			w.WriteHeader(cap.status)
+		}
+		w.Write(cap.body.Bytes())
+	})
 }
 
+func precheckFromBinding(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/tx" {
+			buf, _ := io.ReadAll(r.Body)
+			r.Body.Close()
+			var in txPre
+			if err := json.Unmarshal(buf, &in); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "reason": "malformed_json"})
+				return
+			}
+			envKey := "THOMAS_PUBKEY_" + in.From
+			expected := os.Getenv(envKey)
+			provided := r.Header.Get("X-PubKey")
+			if expected != "" && provided != "" {
+				if provided != expected {
+					incBindMismatch()
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "applied": false, "reason": "verify:from_pub_mismatch"})
+					return
+				}
+			}
+			r.Body = io.NopCloser(bytes.NewReader(buf))
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
+// From↔PubKey 바인딩 검증(옵션)
+func precheckFromBindingWith(eng *app.Engine) func(next http.Handler) http.Handler {
+	must := os.Getenv("THOMAS_REQUIRE_FROM_PUBKEY") == "1"
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost && r.URL.Path == "/tx" {
+				buf, _ := io.ReadAll(r.Body)
+				r.Body.Close()
+				var in txPre
+				if err := json.Unmarshal(buf, &in); err != nil {
+					w.WriteHeader(http.StatusBadRequest)
+					_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "reason": "malformed_json"})
+					return
+				}
+				pkB64 := r.Header.Get("X-PubKey")
+				if pkB64 == "" {
+					if must {
+						w.WriteHeader(http.StatusBadRequest)
+						_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "reason": "from_pubkey_required"})
+						return
+					}
+				} else {
+					pk, err := base64.StdEncoding.DecodeString(pkB64)
+					if err != nil || len(pk) != ed25519.PublicKeySize {
+						w.WriteHeader(http.StatusBadRequest)
+						_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "reason": "bad_pubkey_encoding"})
+						return
+					}
+					implemented, ok := verifyFromBindingReflect(eng, in.From, pk)
+					if !implemented {
+						if must {
+							w.WriteHeader(http.StatusNotImplemented)
+							_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "reason": "from_binding_not_implemented"})
+							return
+						}
+					} else if !ok {
+						incBindMismatch()
+						w.WriteHeader(http.StatusBadRequest)
+						_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "reason": "from_pubkey_mismatch"})
+						return
+					}
+				}
+				r.Body = io.NopCloser(bytes.NewReader(buf))
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
 
+func verifyFromBindingReflect(eng *app.Engine, addr string, pk []byte) (bool, bool) {
+	rv := reflect.ValueOf(eng)
 
+	// 1) (addr, pk) → bool
+	boolCands := []string{"VerifyFromBinding", "AddressOwnsPubKey", "OwnsPubKey", "VerifySender"}
+	for _, name := range boolCands {
+		m := rv.MethodByName(name)
+		if !m.IsValid() {
+			continue
+		}
+		if m.Type().NumIn() == 2 &&
+			m.Type().In(0).Kind() == reflect.String &&
+			m.Type().In(1).Kind() == reflect.Slice &&
+			m.Type().In(1).Elem().Kind() == reflect.Uint8 &&
+			m.Type().NumOut() >= 1 && m.Type().Out(0).Kind() == reflect.Bool {
+			outs := m.Call([]reflect.Value{reflect.ValueOf(addr), reflect.ValueOf(pk)})
+			return true, outs[0].Bool()
+		}
+		if m.Type().NumIn() == 2 &&
+			m.Type().In(0).Kind() == reflect.String &&
+			m.Type().In(1).Kind() == reflect.String &&
+			m.Type().NumOut() >= 1 && m.Type().Out(0).Kind() == reflect.Bool {
+			outs := m.Call([]reflect.Value{
+				reflect.ValueOf(addr),
+				reflect.ValueOf(base64.StdEncoding.EncodeToString(pk)),
+			})
+			return true, outs[0].Bool()
+		}
+	}
 
+	// 2) (addr) → pubkey 후 비교
+	getCands := []string{"GetAccountPubKey", "AccountPubKey", "PubKeyOf", "PubKeyByAddress"}
+	for _, name := range getCands {
+		m := rv.MethodByName(name)
+		if !m.IsValid() {
+			continue
+		}
+		if m.Type().NumIn() == 1 && m.Type().In(0).Kind() == reflect.String && m.Type().NumOut() >= 1 {
+			out := m.Call([]reflect.Value{reflect.ValueOf(addr)})[0].Interface()
+			switch v := out.(type) {
+			case []byte:
+				return true, reflect.DeepEqual(v, pk)
+			case string:
+				if b, err := hex.DecodeString(v); err == nil {
+					return true, reflect.DeepEqual(b, pk)
+				}
+				if b, err := base64.StdEncoding.DecodeString(v); err == nil {
+					return true, reflect.DeepEqual(b, pk)
+				}
+			}
+		}
+	}
+	return false, false
+}
 
+// ===== 내부 헬퍼: pprof no-op 대체 =====
 
+type pprofG interface {
+	WriteTo(io.Writer, int) error
+}
 
+func pprofGoroutine() pprofG { return pprofLookup("goroutine") }
 
+func pprofLookup(name string) pprofG {
+	// 실제 pprof.Lookup 을 쓰는 구현이 다른 파일에 있다면 그걸 사용.
+	// 여기선 최소 no-op 대체 (빌드만 성립시키기 위함)
+	return noopPprof{}
+}
 
+type noopPprof struct{}
+
+func (noopPprof) WriteTo(w io.Writer, _ int) error { _, _ = w.Write([]byte("")); return nil }
+
+// POST /wallet/create
+// Body: { "passphrase": "optional", "label": "optional" }
+// Resp: { ok, algo, pubkey_hex, recovery:{mnemonic,fingerprint,passphrase_used}, note }
+func walletCreateHandler(w http.ResponseWriter, r *http.Request) {
+	setSensitiveNoStoreHeaders(w)
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		Passphrase string `json:"passphrase"`
+		Label      string `json:"label"`
+	}
+	body, _ := io.ReadAll(r.Body)
+	_ = json.Unmarshal(body, &in)
+
+	b, err := mycrypto.NewRecoveryBundle(strings.TrimSpace(in.Passphrase))
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "gen_failed"})
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":         true,
+		"algo":       "ed25519",
+		"pubkey_hex": b.PubKeyHex,
+		"recovery": map[string]any{
+			"mnemonic":        b.Mnemonic,    // ⚠️ 한번만 보여주기 — 프론트에서 재표시 금지
+			"fingerprint":     b.Fingerprint, // UX용 짧은 식별
+			"passphrase_used": in.Passphrase != "",
+		},
+		"note": "Store this mnemonic offline. It will not be shown again.",
+	})
+}
+
+// POST /wallet/restore
+// Body: { "mnemonic": "...", "passphrase": "optional" }
+// Resp: { ok, algo, pubkey_hex }
+func walletRestoreHandler(w http.ResponseWriter, r *http.Request) {
+	setSensitiveNoStoreHeaders(w)
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		Mnemonic   string `json:"mnemonic"`
+		Passphrase string `json:"passphrase"`
+	}
+	body, _ := io.ReadAll(r.Body)
+	if err := json.Unmarshal(body, &in); err != nil || strings.TrimSpace(in.Mnemonic) == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "bad_json"})
+		return
+	}
+	pub, _, err := mycrypto.DeriveFromMnemonic(strings.TrimSpace(in.Mnemonic), strings.TrimSpace(in.Passphrase))
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "derive_failed"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":         true,
+		"algo":       "ed25519",
+		"pubkey_hex": hexLower(pub),
+	})
+}
+
+// GET /tx?hash=...  또는 GET /tx/get?hash=...
+// r2p 결제에서 반환한 tx_hash로 영수증 성격의 메타를 돌려준다.
+// (엔진의 일반 TX 인덱스가 없을 때를 위해, r2pStore에서 우선 매칭)
+func txGetHandler(w http.ResponseWriter, r *http.Request) {
+	// 프리플라이트
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	// JSON 헤더
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+
+	hash := strings.TrimSpace(r.URL.Query().Get("hash"))
+	if hash == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "missing_hash"})
+		return
+	}
+
+	// 1) r2pStore에서 tx_hash 매칭 (결제된 건만 보유)
+	r2pMu.Lock()
+	for _, rec := range r2pStore {
+		if rec.TxHash != "" && strings.EqualFold(rec.TxHash, hash) {
+			out := map[string]any{
+				"ok":   true,
+				"hash": rec.TxHash,
+				"kind": "r2p_payment",
+				"r2p": map[string]any{
+					"id":          rec.ID,
+					"from":        rec.From,
+					"to":          rec.To,
+					"amount_mas":  rec.AmountMas,
+					"memo":        rec.Memo,
+					"status":      rec.Status, // paid/declined/canceled 등
+					"created_utc": rec.CreatedUTC,
+				},
+			}
+			// 선택 필드들(있을 때만)
+			if rec.PaidUTC > 0 {
+				out["r2p"].(map[string]any)["paid_utc"] = rec.PaidUTC
+			}
+			r2pMu.Unlock()
+			_ = json.NewEncoder(w).Encode(out)
+			return
+		}
+	}
+	r2pMu.Unlock()
+
+	// TODO: 나중에 엔진 TX 인덱스가 생기면 여기서 일반 TX 조회로 확장
+	w.WriteHeader(http.StatusNotFound)
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "not_found"})
+}
+
+// hexLower: ed25519.PublicKey -> lower hex
+func hexLower(b []byte) string {
+	const hexdigits = "0123456789abcdef"
+	dst := make([]byte, len(b)*2)
+	for i, v := range b {
+		dst[i*2] = hexdigits[v>>4]
+		dst[i*2+1] = hexdigits[v&0x0f]
+	}
+	return string(dst)
+}
+
+func devFreeR2PEnabled(r *http.Request) bool {
+	if os.Getenv("THOMAS_DEV_FREE_R2P") != "1" {
+		return false
+	}
+	// 로컬호스트에서 오는 요청만 허용
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return false
+	}
+	return true
+}
+
+// err / reason 문자열을 느슨하게 검사: "insufficient funds" / "insufficient_funds" 모두 매치
+func isInsufficientFunds(err error, reason string) bool {
+	s := strings.ToLower(reason)
+	if s == "" && err != nil {
+		s = strings.ToLower(err.Error())
+	}
+	// 공백과 하이픈을 언더스코어로 통일
+	s = strings.ReplaceAll(s, " ", "_")
+	s = strings.ReplaceAll(s, "-", "_")
+	return strings.Contains(s, "insufficient_funds")
+}
