@@ -83,6 +83,37 @@
             }
           }
         }
+      },
+      "get": {
+        "$ref": "#/paths/~1tx~1get/get"
+      }
+    },
+    "/tx/get": {
+      "get": {
+        "tags": ["tx"],
+        "summary": "Lookup transaction by hash (R2P-aware)",
+        "operationId": "getTxByHash",
+        "parameters": [
+          { "in": "query", "name": "hash", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TxLookup" }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
       }
     }
   },
@@ -128,6 +159,30 @@
           "expected_fee_mas": { "type": "integer" },
           "merkle_root": { "type": "string" },
           "receipts_count": { "type": "integer" }
+        },
+        "additionalProperties": true
+      },
+      "TxLookup": {
+        "type": "object",
+        "required": ["ok", "hash"],
+        "properties": {
+          "ok":   { "type": "boolean" },
+          "hash": { "type": "string" },
+          "kind": { "type": "string", "example": "r2p_payment" },
+          "r2p": {
+            "type": "object",
+            "properties": {
+              "id":          { "type": "string" },
+              "from":        { "type": "string" },
+              "to":          { "type": "string" },
+              "amount_mas":  { "type": "integer" },
+              "memo":        { "type": "string" },
+              "status":      { "type": "string", "enum": ["open","paid","declined","canceled"] },
+              "created_utc": { "type": "integer" },
+              "paid_utc":    { "type": "integer" }
+            },
+            "additionalProperties": true
+          }
         },
         "additionalProperties": true
       },

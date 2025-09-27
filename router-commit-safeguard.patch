@@ -1,0 +1,64 @@
+diff --git a/internal/rpc/router.go b/internal/rpc/router.go
+index 0000000..1111111 100644
+--- a/internal/rpc/router.go
++++ b/internal/rpc/router.go
+@@
+ func resolveAddrMaybeAlias(eng *app.Engine, s string) (string, error) {
+     s = strings.TrimSpace(s)
+     if s == "" {
+         return "", fmt.Errorf("empty")
+     }
+@@
+     return s, nil
+ }
+ 
++// ------------------------------------------------------------
++// CommitRound panic-safe wrapper
++// ------------------------------------------------------------
++// commitRoundSafe calls Engine.CommitRound with panic protection so that
++// the HTTP server returns a JSON error instead of closing the connection.
++func commitRoundSafe(eng *app.Engine) (hdr any, ok bool, err error) {
++    defer func() {
++        if r := recover(); r != nil {
++            err = fmt.Errorf("engine.CommitRound panic: %v", r)
++        }
++    }()
++    h, k := eng.CommitRound()
++    return h, k, nil
++}
++
+ // ------------------------------------------------------------
+ // Router
+ // ------------------------------------------------------------
+ func NewRouter(eng *app.Engine) http.Handler {
+     mux := http.NewServeMux()
+@@
+     // Rounds
+     mux.HandleFunc("/round/commit", func(w http.ResponseWriter, r *http.Request) {
+         if r.Method != http.MethodPost {
+             w.WriteHeader(http.StatusMethodNotAllowed)
+             return
+         }
+-        hdr, ok := eng.CommitRound()
+-        w.Header().Set("Content-Type", "application/json")
+-        if !ok {
+-            _ = json.NewEncoder(w).Encode(map[string]any{"committed": false, "reason": "no_pending"})
+-            return
+-        }
+-        _ = json.NewEncoder(w).Encode(map[string]any{"committed": true, "header": hdr})
++        hdr, ok, err := commitRoundSafe(eng)
++        w.Header().Set("Content-Type", "application/json")
++        if err != nil {
++            w.WriteHeader(http.StatusInternalServerError)
++            _ = json.NewEncoder(w).Encode(map[string]any{
++                "committed": false,
++                "reason":    err.Error(),
++            })
++            return
++        }
++        if !ok {
++            _ = json.NewEncoder(w).Encode(map[string]any{"committed": false, "reason": "no_pending"})
++            return
++        }
++        _ = json.NewEncoder(w).Encode(map[string]any{"committed": true, "header": hdr})
+     })

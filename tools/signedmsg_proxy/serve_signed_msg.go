@@ -236,3 +236,4 @@ func logMiddleware(next http.Handler) http.Handler {
 		log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(start))
 	})
 }
+
