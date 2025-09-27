@@ -15,3 +15,4 @@ func main(){
  fmt.Println(base64.StdEncoding.EncodeToString(ed25519.Sign(sk, m)))
 }
 
+

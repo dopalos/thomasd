@@ -1,0 +1,515 @@
+﻿{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "THO Node API",
+    "version": "0.1.0"
+  },
+  "servers": [
+    { "url": "/" }
+  ],
+  "paths": {
+    "/tx": {
+      "post": {
+        "parameters": [
+          {
+            "description": "Reserved. For legacy /tx_old only; current /tx ignores this.",
+            "name": "debug",
+            "in": "query",
+            "schema": { "type": "string", "enum": "skipapply" },
+            "required": false
+          },
+          {
+            "description": "Emit verbose logs (if supported). No-op otherwise.",
+            "name": "debuglog",
+            "in": "query",
+            "schema": { "type": "boolean" },
+            "required": false
+          }
+        ],
+        "summary": "Submit a transfer",
+        "tags": "tx",
+        "operationId": "postTx",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/TxRequest" },
+              "examples": {
+                "ok": {
+                  "value": {
+                    "amount_mas": 100000,
+                    "type": 1,
+                    "expiry_height": 0,
+                    "nonce": 4935,
+                    "from": "tho1alice",
+                    "fee_mas": 100,
+                    "chain_id": "thomas-dev-1",
+                    "msg_commitment": "d20bece125baf11c1f7c0dfff8b20ca575941cb86f2fc521068b2653a75cd3c4",
+                    "to": "tho1bob"
+                  }
+                }
+              }
+            },
+            "application/cbor": {
+              "schema": { "type": "string", "format": "binary" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted / queued with status",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TxStatus" },
+                "examples": {
+                  "bad_nonce": {
+                    "value": {
+                      "to": "tho1bob",
+                      "nonce": 4935,
+                      "amount_mas": 100000,
+                      "applied": false,
+                      "expected_fee_mas": 100,
+                      "height": 18207,
+                      "current_nonce": 4940,
+                      "fee_mas": 100,
+                      "receipts_count": 16843,
+                      "fee": 10,
+                      "reason": "apply:bad_nonce",
+                      "tx_hash": "c8a9...7de00",
+                      "parsed": true,
+                      "merkle_root": "6e6c9c0f...ae51c08",
+                      "time_utc": 1756620735,
+                      "expected_nonce": 4941,
+                      "amount": 10000,
+                      "status": "queued",
+                      "from": "tho1alice",
+                      "ok": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/policy": {
+      "get": {
+        "summary": "Get node policy / chain rules",
+        "tags": "policy",
+        "operationId": "getPolicy",
+        "responses": {
+          "200": {
+            "description": "Policy / chain metadata",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PolicyResponse" },
+                "examples": {
+                  "dev": {
+                    "value": {
+                      "max_msg_commit_len": 64,
+                      "allowed_chain_id": "thomas-dev-1",
+                      "expiry_rule": "valid if expiry_height==0 OR current_height < expiry_height",
+                      "min_fee_mas": 1,
+                      "signing": {
+                        "algo": "ed25519",
+                        "header_canonical": [
+                          "round",
+                          "from_height",
+                          "to_height",
+                          "tx_count",
+                          "root",
+                          "time_utc"
+                        ],
+                        "pubkey_hex": "4f0c...abcd"
+                      },
+                      "fee_bps": 10,
+                      "unit": "mas"
+                    }
+                  }
+                }
+              },
+              "text/plain": {
+                "schema": { "type": "string" },
+                "examples": { "plain": { "value": "thomas-dev-1" } }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "/round/{round}/signed": {
+      "get": {
+        "summary": "Get round N with signature",
+        "tags": "rounds",
+        "operationId": "getSignedRound",
+        "parameters": {
+          "name": "round",
+          "in": "path",
+          "schema": { "type": "integer", "minimum": 1 },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Signed round",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SignedResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad round id",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } }
+            }
+          }
+        }
+      }
+    },
+
+    "/round/latest/signed": {
+      "get": {
+        "summary": "Get latest round with signature",
+        "tags": "rounds",
+        "operationId": "getLatestSignedRound",
+        "responses": {
+          "200": {
+            "description": "Signed latest round",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SignedResponse" },
+                "examples": {
+                  "example": {
+                    "value": {
+                      "algo": "ed25519",
+                      "signature_hex": "9a1b...ff00",
+                      "header": {
+                        "to_height": 18212,
+                        "round": 5,
+                        "root": "e0f26435ae89...29f8621",
+                        "tx_count": 16846,
+                        "from_height": 18193,
+                        "time_utc": 1756640561
+                      },
+                      "pubkey_hex": "4f0c...abcd"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No round",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } }
+            }
+          }
+        }
+      }
+    },
+
+    /* ===== 신규: EternityHeader 기반 엔드포인트 (비파괴 추가) ===== */
+
+    "/eternity/round/latest/signed": {
+      "get": {
+        "summary": "Get latest Eternity header (signed)",
+        "tags": ["eternity"],
+        "operationId": "getLatestEternitySignedHeader",
+        "responses": {
+          "200": {
+            "description": "Signed Eternity header (latest)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SignedHeader" }
+              }
+            }
+          },
+          "404": {
+            "description": "No header",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } }
+            }
+          }
+        }
+      }
+    },
+
+    "/eternity/round/{height}/signed": {
+      "get": {
+        "summary": "Get Eternity header at height (signed)",
+        "tags": ["eternity"],
+        "operationId": "getEternitySignedHeaderByHeight",
+        "parameters": [
+          {
+            "name": "height",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer", "format": "uint64", "minimum": 0 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Signed Eternity header",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SignedHeader" }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } }
+            }
+          }
+        }
+      }
+    },
+
+    "/eternity/round/{height}/header": {
+      "get": {
+        "summary": "Get Eternity header at height (header only)",
+        "tags": ["eternity"],
+        "operationId": "getEternityHeaderByHeight",
+        "parameters": [
+          {
+            "name": "height",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer", "format": "uint64", "minimum": 0 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Eternity header (unsigned)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EternityHeader" }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } }
+            }
+          }
+        }
+      }
+    },
+
+    "/eternity/round/latest/header": {
+      "get": {
+        "summary": "Get latest Eternity header (header only)",
+        "tags": ["eternity"],
+        "operationId": "getLatestEternityHeader",
+        "responses": {
+          "200": {
+            "description": "Eternity header (unsigned)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EternityHeader" }
+              }
+            }
+          },
+          "404": {
+            "description": "No header",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } }
+            }
+          }
+        }
+      }
+    }
+  },
+
+  "components": {
+    "schemas": {
+      "TxStatus": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["status", "parsed", "ok", "applied"],
+        "properties": {
+          "to": { "type": "string" },
+          "nonce": { "type": "integer" },
+          "amount_mas": { "type": "integer" },
+          "applied": { "type": "boolean" },
+          "expected_fee_mas": { "type": "integer" },
+          "height": { "type": "integer" },
+          "current_nonce": { "type": "integer" },
+          "fee_mas": { "type": "integer" },
+          "receipts_count": { "type": "integer" },
+          "fee": { "type": "integer", "description": "Display unit (mas → micro-THO)" },
+          "reason": { "type": "string" },
+          "tx_hash": { "type": "string" },
+          "parsed": { "type": "boolean" },
+          "merkle_root": { "type": "string" },
+          "time_utc": { "type": "integer", "description": "Unix seconds (UTC)" },
+          "expected_nonce": { "type": "integer" },
+          "amount": { "type": "integer", "description": "Display unit (mas → micro-THO)" },
+          "status": { "type": "string", "example": "queued" },
+          "from": { "type": "string" },
+          "ok": { "type": "boolean" }
+        }
+      },
+
+      "SignedResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["header", "pubkey_hex"],
+        "properties": {
+          "algo": {
+            "type": "string",
+            "description": "Signing scheme, e.g. 'ed25519'"
+          },
+          "scheme": {
+            "type": "string",
+            "description": "(compat) may be present instead of 'algo'"
+          },
+          "signature_hex": {
+            "type": "string",
+            "description": "hex-encoded signature"
+          },
+          "header": {
+            "$ref": "#/components/schemas/RoundHeader"
+          },
+          "pubkey_hex": {
+            "type": "string",
+            "description": "hex-encoded public key"
+          }
+        }
+      },
+
+      "RoundHeader": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["round", "from_height", "to_height", "tx_count", "root", "time_utc"],
+        "properties": {
+          "to_height": { "type": "integer" },
+          "round": { "type": "integer" },
+          "root": { "type": "string", "description": "Merkle root (hex)" },
+          "tx_count": { "type": "integer" },
+          "from_height": { "type": "integer" },
+          "time_utc": { "type": "integer", "description": "Unix seconds (UTC)" }
+        }
+      },
+
+      "PolicyResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["allowed_chain_id", "signing"],
+        "properties": {
+          "max_msg_commit_len": { "type": "integer", "example": 64 },
+          "allowed_chain_id": { "type": "string", "example": "thomas-dev-1" },
+          "expiry_rule": { "type": "string" },
+          "min_fee_mas": { "type": "integer", "example": 1 },
+          "signing": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["algo", "pubkey_hex"],
+            "properties": {
+              "algo": { "type": "string", "example": "ed25519" },
+              "header_canonical": {
+                "type": "array",
+                "description": "Canonical header field order",
+                "items": { "type": "string" }
+              },
+              "pubkey_hex": { "type": "string", "description": "hex-encoded public key" }
+            }
+          },
+          "fee_bps": { "type": "integer", "description": "Fee in basis points (0.1% = 10)", "example": 10 },
+          "unit": { "type": "string", "example": "mas" }
+        }
+      },
+
+      "TxRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "from", "to", "amount_mas", "fee_mas", "nonce", "chain_id"],
+        "properties": {
+          "amount_mas": { "type": "integer", "minimum": 1 },
+          "type": { "type": "integer", "description": "Transfer = 1", "enum": 1 },
+          "expiry_height": { "type": "integer", "description": "0 means no expiry", "minimum": 0 },
+          "nonce": { "type": "integer", "minimum": 0 },
+          "from": { "type": "string" },
+          "fee_mas": { "type": "integer", "description": ">= max(1, amount_mas*0.1%)", "minimum": 1 },
+          "chain_id": { "type": "string", "example": "thomas-dev-1" },
+          "msg_commitment": { "type": "string", "description": "Optional commitment (hex), <= 64 bytes" },
+          "to": { "type": "string" }
+        }
+      },
+
+      "ErrorResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "error": { "type": "string" }
+        }
+      },
+
+      /* ===== 신규 스키마: Eternity 계열 ===== */
+
+      "CommitBundle": {
+        "type": "object",
+        "required": ["round", "quorum_hash", "bitmap", "step"],
+        "properties": {
+          "round": { "type": "integer", "format": "uint32" },
+          "quorum_hash": { "type": "string", "description": "hex-encoded 32 bytes" },
+          "bitmap": { "type": "string", "format": "byte" },
+          "step": { "type": "integer", "format": "uint8", "description": "1=proposal,2=prevote,3=precommit" },
+          "aggregate_sig": { "type": "string", "format": "byte" }
+        },
+        "additionalProperties": false
+      },
+
+      "EternityHeader": {
+        "type": "object",
+        "required": [
+          "version","chain_id","height","round","time_utc_unix",
+          "prev_hash","state_root","tx_root","receipts_root","commit_root",
+          "proposer_pubkey","emission_epoch","consensus_params_hash","fee_root"
+        ],
+        "properties": {
+          "version": { "type": "integer", "format": "uint32", "example": 1 },
+          "chain_id": { "type": "string", "example": "thomas-dev-1" },
+          "height": { "type": "integer", "format": "uint64" },
+          "round": { "type": "integer", "format": "uint32" },
+          "time_utc_unix": { "type": "integer", "format": "int64", "description": "Unix seconds (UTC)" },
+          "prev_hash": { "type": "string", "description": "hex-encoded 32 bytes" },
+          "state_root": { "type": "string", "description": "hex-encoded 32 bytes" },
+          "tx_root": { "type": "string", "description": "hex-encoded 32 bytes" },
+          "receipts_root": { "type": "string", "description": "hex-encoded 32 bytes" },
+          "commit_root": { "type": "string", "description": "hex-encoded 32 bytes" },
+          "proposer_pubkey": { "type": "string", "description": "ed25519, 32 bytes, hex-encoded" },
+          "emission_epoch": { "type": "integer", "format": "uint64" },
+          "consensus_params_hash": { "type": "string", "description": "hex-encoded 32 bytes" },
+          "fee_root": { "type": "string", "description": "hex-encoded 32 bytes" },
+          "extra_data": { "type": "string", "format": "byte", "maxLength": 64 }
+        },
+        "additionalProperties": false
+      },
+
+      "SignedHeader": {
+        "type": "object",
+        "required": ["header_cbor","header_hash","proposer_pubkey","signature"],
+        "properties": {
+          "header_cbor": { "type": "string", "format": "byte" },
+          "header_hash": { "type": "string", "description": "hex-encoded 32 bytes" },
+          "proposer_pubkey": { "type": "string", "format": "byte", "description": "ed25519 public key" },
+          "signature": { "type": "string", "format": "byte", "description": "ed25519 signature" },
+          "commit_bundle": { "$ref": "#/components/schemas/CommitBundle" }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}

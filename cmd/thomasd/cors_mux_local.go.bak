@@ -1,0 +1,39 @@
+﻿package main
+
+import (
+	"log"
+	"net/http"
+)
+
+// 전역 mux
+var mux = http.NewServeMux()
+
+// 최소 CORS 래퍼 (Origin 있을 때만 헤더 세팅)
+func withCORS(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+func main() {
+	// (필요하면 여기서 mux.HandleFunc(...)로 핸들러 등록)
+	// 예)
+	// mux.HandleFunc("/r2p/list", r2pListHandler)
+
+	log.Println("thomasd (Thomas Chain) listening on :8081")
+	if err := http.ListenAndServe(":8081", withCORS(mux)); err != nil && err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
+}

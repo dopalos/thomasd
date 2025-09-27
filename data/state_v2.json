@@ -1,18 +1,22 @@
 {
+  "": {
+    "balance": 1000,
+    "nonce": 0
+  },
   "tho1alice": {
-    "balance": 12548360,
-    "nonce": 4895
+    "balance": 12704284,
+    "nonce": 4921
   },
   "tho1bob": {
-    "balance": 7435915,
-    "nonce": 4650
+    "balance": 7278653,
+    "nonce": 4812
   },
   "tho1exchange": {
     "balance": 0,
     "nonce": 3000
   },
   "tho1foundation": {
-    "balance": 13495,
+    "balance": 13833,
     "nonce": 4250
   }
 }
