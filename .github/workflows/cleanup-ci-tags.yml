@@ -1,0 +1,90 @@
+name: Cleanup old ci-* tags
+
+on:
+  schedule:
+    - cron: "0 18 * * 0"  # 매주 일요일 18:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  RETAIN_DAYS: "14"             # 이 기간 이내 업데이트된 건 유지
+  RETAIN_MIN_COUNT: "50"        # 최소 보존 개수
+  REGISTRY: ghcr.io
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Delete old ci-* tags from GHCR
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REPO:  ${{ github.event.repository.name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACKAGE="${REPO,,}"  # container package name == repo name (lowercase)
+          cutoff=$(date -u -d "-${RETAIN_DAYS} days" +%s || date -u -v -"${RETAIN_DAYS}"d +%s)
+
+          fetch_versions () {
+            local scope="$1" # users or orgs
+            gh api -H "Accept: application/vnd.github+json" \
+              "/${scope}/${OWNER}/packages/container/${PACKAGE}/versions?per_page=100"
+          }
+
+          delete_version () {
+            local scope="$1" id="$2"
+            echo "Deleting version id=$id via scope=$scope"
+            gh api -X DELETE -H "Accept: application/vnd.github+json" \
+              "/${scope}/${OWNER}/packages/container/${PACKAGE}/versions/${id}"
+          }
+
+          # try user scope first, then org scope
+          SCOPE="users"
+          if ! fetch_versions "$SCOPE" >/tmp/vers.json 2>/dev/null; then
+            SCOPE="orgs"
+            fetch_versions "$SCOPE" >/tmp/vers.json
+          fi
+
+          total_ci=$(jq '[ .[] | select(.metadata.container.tags[]? | startswith("ci-")) ] | length' /tmp/vers.json)
+          echo "Total ci-* versions: $total_ci"
+
+          # sort by updated_at asc, filter ci-*, collect ids
+          mapfile -t CI_IDS < <(jq -r '
+            [ .[] 
+              | select((.metadata.container.tags | any(. ; startswith("ci-"))))
+              | { id: .id, updated: (.updated_at | sub("Z$"; "+00:00") ) }
+            ]
+            | sort_by(.updated)
+            | .[].id
+          ' /tmp/vers.json)
+
+          kept=0
+          deleted=0
+          for vid in "${CI_IDS[@]}"; do
+            # fetch single version to read tags & updated_at
+            vjson=$(gh api -H "Accept: application/vnd.github+json" "/${SCOPE}/${OWNER}/packages/container/${PACKAGE}/versions/${vid}")
+            tags=$(echo "$vjson" | jq -r '.metadata.container.tags[]?')
+            updated=$(echo "$vjson" | jq -r '.updated_at')
+            updated_epoch=$(date -u -d "$updated" +%s || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$updated" +%s)
+
+            if (( kept < RETAIN_MIN_COUNT )); then
+              ((kept++))
+              continue
+            fi
+
+            if (( updated_epoch < cutoff )); then
+              delete_version "$SCOPE" "$vid" || true
+              ((deleted++))
+            else
+              ((kept++))
+            fi
+          done
+
+          echo "Kept: $kept, Deleted: $deleted"

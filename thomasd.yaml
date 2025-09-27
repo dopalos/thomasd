@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: thomasd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: thomasd
+  template:
+    metadata:
+      labels:
+        app: thomasd
+    spec:
+      containers:
+        - name: thomasd
+          # 배포 시점에 최신 다이제스트로 교체 권장
+          image: ghcr.io/dopalos/thomasd@sha256:c7f6b1cb1752dbc506b8b181162e4f2d8b53ee83b6c39fc0dae10ac8c84b72c6
+          ports:
+            - containerPort: 8081
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: thomasd
+spec:
+  selector:
+    app: thomasd
+  type: ClusterIP
+  ports:
+    - port: 8081
+      targetPort: 8081

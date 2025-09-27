@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "height": 1,
+  "last_committed_height": 1,
+  "receipts": [],
+  "rounds": [
+    {
+      "round": 1,
+      "from_height": 1,
+      "to_height": 1,
+      "tx_count": 1,
+      "root": "497e795af5ab0c4f72927aceabc010115b20c6534d123c90a3a1fba2cc948cba",
+      "time_utc": 1758669984,
+      "signature_hex": "f3b6e3a2370702e14741245df580b7590dd8d1f3ebaf1d5e1a484b27b4544c06a851b6c0624c79ca79ae5eb0e2a7214e84ae380deb1156f8e5cc708ab7b6e008"
+    }
+  ]
+}

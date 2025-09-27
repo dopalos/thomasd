@@ -1,0 +1,163 @@
+﻿diff --git a/internal/rpc/router.go b/internal/rpc/router.go
+--- a/internal/rpc/router.go
++++ b/internal/rpc/router.go
+@@
+         w.Header().Set("Content-Type", "application/json")
+         _ = json.NewEncoder(w).Encode(map[string]any{
+             "unit":               "mas",
+             "fee_bps":            feeBps,
+             "min_fee_mas":        1,
+             "max_msg_commit_len": maxMsgCommitLen,
+             "allowed_chain_id":   expectedChainID,
+-            "alias_enabled":      true,
+-            "r2p_enabled":        true,
++            "alias_enabled":      true,
++            "r2p_enabled":        true,
++            "require": map[string]any{
++                "commit":      os.Getenv("THOMAS_REQUIRE_COMMIT") == "1",
++                "signature":   os.Getenv("THOMAS_VERIFY_SIG") == "1",
++                "from_pubkey": os.Getenv("THOMAS_REQUIRE_FROM_PUBKEY") == "1",
++            },
+             "signing": map[string]any{
+                 "algo":             "ed25519",
+                 "pubkey_hex":       eng.PubKeyHex(),
+                 "header_canonical": []string{"round", "from_height", "to_height", "tx_count", "root", "time_utc"},
+             },
+         })
+     })
+@@
+-    return debuglogRateLimit(
+-        txPrecheckWith(
+-            precheckSig(
+-                precheckFromBinding(
+-                    precheckCommit(mux),
+-                ),
+-            ),
+-            func() int64 { return int64(eng.CurrentHeight()) },
+-        ),
+-    )
++    return debuglogRateLimit(
++        txPrecheckWith(
++            precheckSig(
++                precheckFromBindingWith(eng)(
++                    precheckCommit(mux),
++                ),
++            ),
++            func() int64 { return int64(eng.CurrentHeight()) },
++        ),
++    )
+ }
+ 
+ // ------------------------------------------------------------
+ // TX prechecks (safe minimal)
+ // ------------------------------------------------------------
+@@
+-func precheckFromBinding(next http.Handler) http.Handler   { return next }
++// From↔PubKey 바인딩 검증(옵션). THOMAS_REQUIRE_FROM_PUBKEY=1 일 때 의무화.
++func precheckFromBindingWith(eng *app.Engine) func(http.Handler) http.Handler {
++    must := os.Getenv("THOMAS_REQUIRE_FROM_PUBKEY") == "1"
++    return func(next http.Handler) http.Handler {
++        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++            if r.Method == http.MethodPost && r.URL.Path == "/tx" {
++                buf, _ := io.ReadAll(r.Body)
++                r.Body.Close()
++                var in txPre
++                if err := json.Unmarshal(buf, &in); err != nil {
++                    w.WriteHeader(http.StatusBadRequest)
++                    _ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "reason": "malformed_json"})
++                    return
++                }
++                pkB64 := r.Header.Get("X-PubKey")
++                if pkB64 == "" {
++                    if must {
++                        w.WriteHeader(http.StatusBadRequest)
++                        _ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "reason": "from_pubkey_required"})
++                        return
++                    }
++                    r.Body = io.NopCloser(bytes.NewReader(buf))
++                    next.ServeHTTP(w, r)
++                    return
++                }
++                pk, err := base64.StdEncoding.DecodeString(pkB64)
++                if err != nil || len(pk) != ed25519.PublicKeySize {
++                    w.WriteHeader(http.StatusBadRequest)
++                    _ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "reason": "bad_pubkey_encoding"})
++                    return
++                }
++                implemented, ok := verifyFromBindingReflect(eng, in.From, pk)
++                if !implemented {
++                    if must {
++                        w.WriteHeader(http.StatusNotImplemented)
++                        _ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "reason": "from_binding_not_implemented"})
++                        return
++                    }
++                } else if !ok {
++                    w.WriteHeader(http.StatusBadRequest)
++                    _ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "reason": "from_pubkey_mismatch"})
++                    return
++                }
++                r.Body = io.NopCloser(bytes.NewReader(buf))
++            }
++            next.ServeHTTP(w, r)
++        })
++    }
++}
+ func withJSONErrorFallback(next http.Handler) http.Handler { return next }
+ func jsonizeSigErrors(next http.Handler) http.Handler      { return next }
+ 
+ // ------------------------------------------------------------
+-// Alias reflection helpers
++// Binding reflection helper
++// ------------------------------------------------------------
++// verifyFromBindingReflect: 엔진에 존재할 수 있는 다양한 시그니처를 반사로 호출해
++// 주소↔공개키 바인딩을 확인한다. 반환값: (implemented, ok)
++func verifyFromBindingReflect(eng *app.Engine, addr string, pk []byte) (bool, bool) {
++    rv := reflect.ValueOf(eng)
++    // (addr, pk) → bool
++    boolCands := []string{"VerifyFromBinding", "AddressOwnsPubKey", "OwnsPubKey", "VerifySender"}
++    for _, name := range boolCands {
++        m := rv.MethodByName(name)
++        if !m.IsValid() { continue }
++        // (string, []byte) bool
++        if m.Type().NumIn() == 2 &&
++            m.Type().In(0).Kind() == reflect.String &&
++            m.Type().In(1).Kind() == reflect.Slice &&
++            m.Type().In(1).Elem().Kind() == reflect.Uint8 &&
++            m.Type().NumOut() >= 1 && m.Type().Out(0).Kind() == reflect.Bool {
++            outs := m.Call([]reflect.Value{reflect.ValueOf(addr), reflect.ValueOf(pk)})
++            return true, outs[0].Bool()
++        }
++        // (string, string) bool  (pk 문자열 인코딩 받는 구현)
++        if m.Type().NumIn() == 2 &&
++            m.Type().In(0).Kind() == reflect.String &&
++            m.Type().In(1).Kind() == reflect.String &&
++            m.Type().NumOut() >= 1 && m.Type().Out(0).Kind() == reflect.Bool {
++            outs := m.Call([]reflect.Value{
++                reflect.ValueOf(addr),
++                reflect.ValueOf(base64.StdEncoding.EncodeToString(pk)),
++            })
++            return true, outs[0].Bool()
++        }
++    }
++    // 공개키 조회 후 비교: (addr) → []byte|string
++    getCands := []string{"GetAccountPubKey", "AccountPubKey", "PubKeyOf", "PubKeyByAddress"}
++    for _, name := range getCands {
++        m := rv.MethodByName(name)
++        if !m.IsValid() { continue }
++        if m.Type().NumIn() == 1 && m.Type().In(0).Kind() == reflect.String && m.Type().NumOut() >= 1 {
++            out := m.Call([]reflect.Value{reflect.ValueOf(addr)})[0].Interface()
++            switch v := out.(type) {
++            case []byte:
++                return true, reflect.DeepEqual(v, pk)
++            case string:
++                if b, err := hex.DecodeString(v); err == nil { return true, reflect.DeepEqual(b, pk) }
++                if b, err := base64.StdEncoding.DecodeString(v); err == nil { return true, reflect.DeepEqual(b, pk) }
++            }
++        }
++    }
++    return false, false
++}
++
++// ------------------------------------------------------------
++// Alias reflection helpers
+ // ------------------------------------------------------------

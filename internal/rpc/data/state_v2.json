@@ -1,0 +1,14 @@
+{
+  "tho1alice": {
+    "balance": 20000000,
+    "nonce": 0
+  },
+  "tho1exchange": {
+    "balance": 0,
+    "nonce": 0
+  },
+  "tho1foundation": {
+    "balance": 0,
+    "nonce": 0
+  }
+}
