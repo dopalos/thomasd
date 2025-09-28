@@ -24,7 +24,9 @@ import (
 	app "thomasd/internal/app"
 	"thomasd/internal/buildinfo"
 	mycrypto "thomasd/internal/crypto"
+	"thomasd/internal/health"
 	"thomasd/internal/rewards"
+	"thomasd/internal/stake"
 	"thomasd/internal/state/validators"
 	"thomasd/internal/types"
 	"time"
@@ -32,36 +34,85 @@ import (
 	tx "thomasd/internal/tx"
 )
 
-// --- glue: globals & env-backed params (add this block near the top of router.go) ---
+// --- glue: globals & env-backed params ---
 
-// 전역 mux/handler/engine (다른 파일에 없을 때만 필요)
 var (
 	mux               = http.NewServeMux()
 	root http.Handler = mux
 	eng  *app.Engine
 )
 
-// main에서 엔진 주입용
+// 임포트가 에디터에서 지워지지 않도록 앵커(컴파일 영향 없음)
+var _ = health.InvariantsHandler
+
+// main.go에서 호출
 func SetEngine(e *app.Engine) { eng = e }
 
-// 서버 시작 기준 시각 (uptime 계산용)
+// 서버 시작 시각 (uptime)
 var bootTime = time.Now()
 
-// 디버그 로그 레이트리미터 (현재는 no-op로 통과)
-func debuglogRateLimit(next http.Handler) http.Handler {
-	return next
+// /health/invariants 용 스냅샷 프로바이더
+type snapProvider struct{}
+
+// 엔진이 아래 메서드를 제공하면 자동으로 사용
+type hasCurrentValSet interface{ CurrentValSet() *stake.ValSet }
+type hasAdvRoot interface{ AdvertisedValidatorsRoot() [32]byte }
+type hasHeight interface{ CurrentHeight() uint64 }
+type hasReceiptsI interface{ ReceiptCount() int }
+type hasReceiptsU interface{ ReceiptCount() uint64 }
+
+func (snapProvider) CurrentValSet() *stake.ValSet {
+	if eng == nil {
+		return nil
+	}
+	if h, ok := any(eng).(hasCurrentValSet); ok {
+		return h.CurrentValSet()
+	}
+	return nil
+}
+func (snapProvider) AdvertisedValidatorsRoot() [32]byte {
+	var zero [32]byte
+	if eng == nil {
+		return zero
+	}
+	if h, ok := any(eng).(hasAdvRoot); ok {
+		return h.AdvertisedValidatorsRoot()
+	}
+	return zero
+}
+func (snapProvider) CurrentHeight() uint64 {
+	if eng == nil {
+		return 0
+	}
+	if h, ok := any(eng).(hasHeight); ok {
+		return h.CurrentHeight()
+	}
+	return 0
+}
+func (snapProvider) ReceiptCount() uint64 {
+	if eng == nil {
+		return 0
+	}
+	if h, ok := any(eng).(hasReceiptsU); ok {
+		return h.ReceiptCount()
+	}
+	if h, ok := any(eng).(hasReceiptsI); ok {
+		return uint64(h.ReceiptCount())
+	}
+	return 0
 }
 
-// 통화 단위 변환 상수
-// 1 THO = 10,000,000 mas  →  1 micro-THO(μTHO) = 10 mas
+// 디버그 로그 레이트리미터 (현재 no-op)
+func debuglogRateLimit(next http.Handler) http.Handler { return next }
+
+// 통화 단위
 const (
 	masPerMicro = 10
-	masPerTHO   = masPerMicro * 1_000_000 // 10 * 1,000,000 = 10,000,000
+	masPerTHO   = masPerMicro * 1_000_000 // 10,000,000
 )
 
-// 최소 수수료 계산 (basis points)
+// 최소 수수료 계산 (bps)
 func minFeeMas(amountMas uint64, feeBps int) uint64 {
-	// ceil(amount * bps / 10000), 그리고 최소 1 mas 보장
 	minByBps := (amountMas*uint64(feeBps) + 9999) / 10000
 	if minByBps < 1 {
 		return 1
@@ -69,10 +120,10 @@ func minFeeMas(amountMas uint64, feeBps int) uint64 {
 	return minByBps
 }
 
-// 외부에서 HTTP 핸들러 가져갈 때 사용
+// 외부에서 HTTP 핸들러
 func Handler() http.Handler { return root }
 
-// r2p 퍼시스턴스 훅 (다른 파일에 구현 없을 경우 no-op)
+// r2p 퍼시스턴스 훅(다른 파일에 구현되어 있으면 그걸 사용)
 func callLoadR2PIfExists() {}
 func saveR2P()             {}
 
@@ -80,7 +131,7 @@ func saveR2P()             {}
 func feeBpsEnv() int {
 	s := strings.TrimSpace(os.Getenv("THOMAS_FEE_BPS"))
 	if s == "" {
-		return 25 // 기본 bps
+		return 25
 	}
 	if v, err := strconv.Atoi(s); err == nil && v >= 0 {
 		return v
@@ -90,7 +141,7 @@ func feeBpsEnv() int {
 func maxMsgCommitLenEnv() int {
 	s := strings.TrimSpace(os.Getenv("THOMAS_MAX_MSG_COMMIT_LEN"))
 	if s == "" {
-		return 256 // 기본 길이
+		return 256
 	}
 	if v, err := strconv.Atoi(s); err == nil && v > 0 {
 		return v
@@ -98,19 +149,16 @@ func maxMsgCommitLenEnv() int {
 	return 256
 }
 
-// 이 파일에서 참조하는 변수들 (다른 파일에 동일 이름이 이미 있으면 이 둘은 제거)
 var (
 	feeBps          = feeBpsEnv()
 	maxMsgCommitLen = maxMsgCommitLenEnv()
 )
 
-// ==== 중요: 이 파일 안에서만 필요한 상수/헬퍼 ====
-
-// 체인ID (중복 금지: 이 한 줄만 남기세요)
+// 체인ID (중복 금지: 이 한 줄만)
 const expectedChainID = app.DefaultChainID
 
-// EternityHeader의 시간 값을 최대한 호환적으로 꺼낸다.
-// - TimeUTCUnix(uint64) / Timestamp(int64) / TimeUTC(int64) 등 지원
+// ===== EternityHeader 리플렉션 헬퍼 =====
+
 func hdrTimeUnix(h *types.EternityHeader) int64 {
 	rv := reflect.ValueOf(h).Elem()
 	try := func(name string) (int64, bool) {
@@ -140,7 +188,6 @@ func hdrTimeUnix(h *types.EternityHeader) int64 {
 
 var tBytes32 = reflect.TypeOf([32]byte{})
 
-// EternityHeader의 [32]byte 필드들을 이름 후보들로 찾아서 반환
 func hdrBytes32Field(h *types.EternityHeader, names ...string) ([32]byte, bool) {
 	rv := reflect.ValueOf(h).Elem()
 	for _, n := range names {
@@ -153,24 +200,18 @@ func hdrBytes32Field(h *types.EternityHeader, names ...string) ([32]byte, bool) 
 }
 
 func hdrProposerKey(h *types.EternityHeader) ([32]byte, bool) {
-	// ProposerKey 또는 ProposerPubKey
 	if v, ok := hdrBytes32Field(h, "ProposerKey", "ProposerPubKey"); ok {
 		return v, true
 	}
 	return [32]byte{}, false
 }
-
 func hdrProposerSetHash(h *types.EternityHeader) ([32]byte, bool) {
-	// ProposerSetHash / ValidatorsRoot / ValidatorSetHash
 	if v, ok := hdrBytes32Field(h, "ProposerSetHash", "ValidatorsRoot", "ValidatorSetHash"); ok {
 		return v, true
 	}
 	return [32]byte{}, false
 }
-
 func hdrCommitHash(h *types.EternityHeader) ([32]byte, bool) {
-	// CommitHash 우선, 다음으로 CommitRoot([32]byte),
-	// 아니면 Commit(struct)에 Root() 메서드가 있으면 호출
 	if v, ok := hdrBytes32Field(h, "CommitHash"); ok {
 		return v, true
 	}
@@ -180,7 +221,6 @@ func hdrCommitHash(h *types.EternityHeader) ([32]byte, bool) {
 	rv := reflect.ValueOf(h).Elem()
 	cf := rv.FieldByName("Commit")
 	if cf.IsValid() {
-		// Commit.Root() ([32]byte) 지원
 		m := cf.Addr().MethodByName("Root")
 		if m.IsValid() && m.Type().NumIn() == 0 && m.Type().NumOut() == 1 && m.Type().Out(0) == tBytes32 {
 			out := m.Call(nil)[0].Interface().([32]byte)
@@ -189,23 +229,16 @@ func hdrCommitHash(h *types.EternityHeader) ([32]byte, bool) {
 	}
 	return [32]byte{}, false
 }
-
 func hdrPrevHash(h *types.EternityHeader) ([32]byte, bool) {
 	return hdrBytes32Field(h, "PrevHash", "PreviousHash", "LastBlockID")
 }
-
-func hdrStateRoot(h *types.EternityHeader) ([32]byte, bool) {
-	return hdrBytes32Field(h, "StateRoot")
-}
-
+func hdrStateRoot(h *types.EternityHeader) ([32]byte, bool) { return hdrBytes32Field(h, "StateRoot") }
 func hdrTxRoot(h *types.EternityHeader) ([32]byte, bool) {
 	return hdrBytes32Field(h, "TxRoot", "TransactionsRoot")
 }
-
 func hdrEvidenceRoot(h *types.EternityHeader) ([32]byte, bool) {
 	return hdrBytes32Field(h, "EvidenceRoot")
 }
-
 func hdrSignature(h *types.EternityHeader) ([]byte, bool) {
 	rv := reflect.ValueOf(h).Elem()
 	f := rv.FieldByName("Signature")
@@ -214,10 +247,7 @@ func hdrSignature(h *types.EternityHeader) ([]byte, bool) {
 	}
 	return nil, false
 }
-
-// header.BlockID() 또는 header.Hash()를 통해 [32]byte 블록ID를 얻는다.
 func hdrBlockID32(h *types.EternityHeader) ([32]byte, bool) {
-	// pointer receiver를 고려해서 &h로 인터페이스 캐스팅
 	if v, ok := any(h).(interface{ BlockID() [32]byte }); ok {
 		return v.BlockID(), true
 	}
@@ -228,7 +258,6 @@ func hdrBlockID32(h *types.EternityHeader) ([32]byte, bool) {
 	return [32]byte{}, false
 }
 
-// any → hex string (32바이트 배열이면 hex로, []byte도 hex로)
 func anyToHex(v any) (string, bool) {
 	switch t := v.(type) {
 	case [32]byte:
@@ -238,7 +267,6 @@ func anyToHex(v any) (string, bool) {
 	}
 	return "", false
 }
-
 func b32ToHex(a [32]byte) string { return hex.EncodeToString(a[:]) }
 
 // ============================
@@ -266,15 +294,10 @@ var (
 	r2pStore = map[string]*r2pRecord{}
 )
 
-// 주의: r2pSaveLocked, incBadSigJSON, incBindMismatch 등은
-// 다른 파일(예: r2p_persist.go, metrics.go)에 이미 정의되어 있어야 합니다.
-// 여기서는 **재정의하지 않습니다**.
-
 // ============================
-// 내부 helpers (쿼리/맵 파싱, 엔진 리플렉션)
+// 내부 helpers
 // ============================
 
-// 쿼리에서 int64 추출
 func extractInt64Query(r *http.Request, key string, def int64) int64 {
 	q := r.URL.Query().Get(key)
 	if q == "" {
@@ -286,8 +309,6 @@ func extractInt64Query(r *http.Request, key string, def int64) int64 {
 	}
 	return v
 }
-
-// 임의 값 → map[string]any (JSON roundtrip)
 func toMapFromAny(v any) map[string]any {
 	if v == nil {
 		return map[string]any{}
@@ -302,7 +323,6 @@ func toMapFromAny(v any) map[string]any {
 	}
 	return m
 }
-
 func extractInt64Map(m map[string]any, key string) int64 {
 	if m == nil {
 		return 0
@@ -320,7 +340,6 @@ func extractInt64Map(m map[string]any, key string) int64 {
 			return i
 		}
 	}
-	// Version/ version 대체 키 지원
 	if key == "version" {
 		if v, ok := m["Version"]; ok {
 			if f, ok2 := v.(float64); ok2 {
@@ -331,7 +350,6 @@ func extractInt64Map(m map[string]any, key string) int64 {
 	return 0
 }
 
-// 엔진 Alias resolve (반영구 호환 리플렉션)
 func callEngResolveAlias(eng *app.Engine, name string) (map[string]any, bool) {
 	rv := reflect.ValueOf(eng)
 	candidates := []string{"ResolveAliasFile", "ResolveAlias", "AliasResolve", "GetAlias", "GetAliasRecord", "AliasLookup"}
@@ -383,7 +401,7 @@ func callEngReverseAlias(eng *app.Engine, addr string) (name string, implemented
 	return "", false, false
 }
 
-// @alias → 실제 주소로 (엔진 미구현 시 false)
+// @alias → 실제 주소 (엔진 미구현 시 false)
 func resolveAddressMaybeAlias(eng *app.Engine, in string) (addr string, aliasNorm string, aliasVer int64, ok bool) {
 	if strings.HasPrefix(in, "@") {
 		rec, implemented := callEngResolveAlias(eng, in)
@@ -398,13 +416,61 @@ func resolveAddressMaybeAlias(eng *app.Engine, in string) (addr string, aliasNor
 	}
 	return in, "", 0, true
 }
-
 func resolveAddrMaybeAlias(eng *app.Engine, in string) (string, error) {
 	addr, _, _, ok := resolveAddressMaybeAlias(eng, in)
 	if !ok || addr == "" {
 		return "", fmt.Errorf("bad_owner_or_alias")
 	}
 	return addr, nil
+}
+
+// 엔진으로부터 영수증을 해시로 찾아오는 범용 리플렉션 헬퍼
+func findReceiptByHash(eng *app.Engine, hash string) (rec map[string]any, implemented bool, found bool) {
+	rv := reflect.ValueOf(eng)
+
+	// 후보 메서드들: (string) -> Receipt  혹은 (string) -> (Receipt, bool)
+	candidates := []string{
+		"ReceiptByHash", "GetReceipt", "FindReceipt", "GetTxReceipt", "Receipt", "LookupReceipt",
+	}
+	for _, name := range candidates {
+		m := rv.MethodByName(name)
+		if !m.IsValid() {
+			continue
+		}
+		// (string) 인자 1개
+		if m.Type().NumIn() != 1 || m.Type().In(0).Kind() != reflect.String {
+			continue
+		}
+		// 반환 1~2개
+		if m.Type().NumOut() < 1 || m.Type().NumOut() > 2 {
+			continue
+		}
+		outs := m.Call([]reflect.Value{reflect.ValueOf(hash)})
+		implemented = true
+
+		// 1개 반환: Receipt
+		if len(outs) == 1 {
+			r := outs[0].Interface()
+			rec = toMapFromAny(r)
+			if len(rec) > 0 {
+				return rec, true, true
+			}
+			return rec, true, false
+		}
+
+		// 2개 반환: (Receipt, bool)
+		r := outs[0].Interface()
+		ok := false
+		if b, ok2 := outs[1].Interface().(bool); ok2 {
+			ok = b
+		}
+		if !ok {
+			return map[string]any{}, true, false
+		}
+		rec = toMapFromAny(r)
+		return rec, true, true
+	}
+	return map[string]any{}, false, false
 }
 
 // ============================
@@ -416,7 +482,6 @@ func genR2PID() string {
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
-
 func r2pUpdatedAt(x r2pRecord) int64 {
 	m := x.CreatedUTC
 	if x.PaidUTC > m {
@@ -443,23 +508,56 @@ func setSensitiveNoStoreHeaders(w http.ResponseWriter) {
 }
 
 // ============================
-// 초기 라우팅 바인딩 (전역 mux/eng/bootTime/feeBps 등은 패키지 내 다른 파일에서 제공)
+// 초기 라우팅 바인딩
 // ============================
 
 func init() {
-	// 디스크 로드 (best-effort) — 구현은 다른 파일에서
+	// 디스크 로드 (best-effort)
 	callLoadR2PIfExists()
 
-	// expvar (optional)
+	// expvar
 	if os.Getenv("THOMAS_ENABLE_VARZ") == "1" {
 		mux.Handle("/debug/vars", expvar.Handler())
 	}
 
+	// ✅ 새 인바리언트 핸들러 (루트 비교/검증 포함)
+	mux.HandleFunc("/health/invariants", health.InvariantsHandler(snapProvider{}))
+
 	// 목록 (updated desc)
 	mux.HandleFunc("/r2p/list", r2pListHandlerOpaque)
 
-	mux.HandleFunc("/tx", txHandler) // 단일 디스패처
+	// /tx 단일 디스패처
+	mux.HandleFunc("/tx", txHandler)
 	mux.HandleFunc("/tx/get", txGetHandler)
+
+	// 일반 트랜잭션 영수증 조회 (엔진이 조회 메서드를 구현했을 때만 동작)
+	mux.HandleFunc("/receipt/get", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		hash := strings.TrimSpace(r.URL.Query().Get("hash"))
+		if hash == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "missing_hash"})
+			return
+		}
+
+		rec, implemented, found := findReceiptByHash(eng, hash)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+		if !implemented {
+			w.WriteHeader(http.StatusNotImplemented)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "not_implemented"})
+			return
+		}
+		if !found || len(rec) == 0 {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "not_found"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "receipt": rec})
+	})
 
 	// Debug echo
 	mux.HandleFunc("/debug/echo", func(w http.ResponseWriter, r *http.Request) {
@@ -468,7 +566,7 @@ func init() {
 		_, _ = w.Write(b)
 	})
 
-	// Debug stack (pprof no-op 대체)
+	// Debug stack (pprof no-op)
 	mux.HandleFunc("/debug/stack", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -572,8 +670,8 @@ func init() {
 		})
 	})
 
-	// Health invariants
-	mux.HandleFunc("/health/invariants", func(w http.ResponseWriter, r *http.Request) {
+	// 체인 상태 요약(기존 height/receipts 확인은 별도의 경로로 유지)
+	mux.HandleFunc("/health/chain", func(w http.ResponseWriter, r *http.Request) {
 		h := eng.CurrentHeight()
 		receiptCount := uint64(eng.ReceiptCount())
 		ok := (h == receiptCount)
@@ -703,7 +801,6 @@ func init() {
 			"block_mint_mas":       minted,
 		}
 	}
-
 	mux.HandleFunc("/supply/current", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -714,7 +811,6 @@ func init() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(supplyToJSON(st, minted))
 	})
-
 	mux.HandleFunc("/supply/at/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -871,7 +967,6 @@ func init() {
 			return
 		}
 
-		// 공통 필드
 		resp := map[string]any{
 			"chain_id": expectedChainID,
 			"height":   h.Height,
@@ -911,7 +1006,7 @@ func init() {
 			resp["signature_hex"] = hex.EncodeToString(sig)
 		}
 
-		// Commit 서브구조(있을 때만 요약)
+		// Commit 서브구조 요약(있을 때만)
 		rv := reflect.ValueOf(&h).Elem()
 		cf := rv.FieldByName("Commit")
 		if cf.IsValid() {
@@ -926,7 +1021,6 @@ func init() {
 				arr := f.Interface().([32]byte)
 				cm["block_id_hex"] = hex.EncodeToString(arr[:])
 			}
-
 			if f := cf.FieldByName("Signatures"); f.IsValid() && f.Kind() == reflect.Slice {
 				cm["signature_count"] = f.Len()
 			}
@@ -963,7 +1057,7 @@ func init() {
 			return
 		}
 
-		// 커밋 번들은 엔진이 제공하면 사용
+		// 커밋 번들 (엔진이 제공할 때만)
 		bundleMap, bundleOK := func() (map[string]any, bool) {
 			rv := reflect.ValueOf(eng)
 			m := rv.MethodByName("CommitBundleAt")
@@ -978,10 +1072,8 @@ func init() {
 			if !okv {
 				return nil, false
 			}
-			// 첫번째 아웃이 임의 타입의 CommitBundle
 			b := outs[0]
 			out := map[string]any{}
-			// 필드 추출(있을 때만)
 			if f := b.FieldByName("Height"); f.IsValid() && (f.Kind() == reflect.Uint64 || f.Kind() == reflect.Uint || f.Kind() == reflect.Int64 || f.Kind() == reflect.Int) {
 				out["height"] = fmt.Sprintf("%v", f.Interface())
 			}
@@ -995,7 +1087,7 @@ func init() {
 			if f := b.FieldByName("Signatures"); f.IsValid() && f.Kind() == reflect.Slice {
 				out["signature_count"] = f.Len()
 			}
-			// Root() 있으면 commit_root_hex도 추가
+			// Root() 있으면 commit_root_hex 추출
 			if m2 := b.Addr().MethodByName("Root"); m2.IsValid() && m2.Type().NumIn() == 0 && m2.Type().NumOut() == 1 && m2.Type().Out(0) == tBytes32 {
 				root := m2.Call(nil)[0].Interface().([32]byte)
 				out["commit_root_hex"] = hex.EncodeToString(root[:])
@@ -1003,7 +1095,6 @@ func init() {
 			return out, true
 		}()
 
-		// header 쪽 요약
 		headerMap := map[string]any{
 			"chain_id": expectedChainID,
 			"height":   header.Height,
@@ -1029,7 +1120,7 @@ func init() {
 			headerMap["pubkey_hex"] = b32ToHex(v)
 		}
 		if v, ok2 := hdrProposerSetHash(&header); ok2 {
-			headerMap["proposer_set"] = b32ToHex(v)
+			headerMap["validators_root"] = b32ToHex(v)
 		}
 		if v, ok2 := hdrCommitHash(&header); ok2 {
 			headerMap["commit_hash"] = b32ToHex(v)
@@ -1053,7 +1144,6 @@ func init() {
 		if bundleOK {
 			resp["commit_bundle"] = bundleMap
 		} else {
-			// 기존 동작에 맞춰 커밋 번들이 없으면 404 처리
 			w.WriteHeader(http.StatusNotFound)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "commit_not_found"})
 			return
@@ -1118,7 +1208,6 @@ func init() {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "record": rec})
 	})
-
 	mux.HandleFunc("/alias/reverse", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -1165,8 +1254,8 @@ func init() {
 			return
 		}
 		var in struct {
-			From      string `json:"from"` // payee
-			To        string `json:"to"`   // payer
+			From      string `json:"from"`
+			To        string `json:"to"`
 			AmountMas int64  `json:"amount_mas"`
 			Memo      string `json:"memo"`
 		}
@@ -1233,7 +1322,7 @@ func init() {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "record": rec})
 	})
 
-	// 승인 (결제) — dev free 모드 지원
+	// 승인(결제) — dev free 모드 지원
 	mux.HandleFunc("/r2p/approve", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -1247,8 +1336,8 @@ func init() {
 
 		var in struct {
 			ID     string `json:"id"`
-			Payer  string `json:"payer"`   // optional
-			FeeMas int64  `json:"fee_mas"` // optional
+			Payer  string `json:"payer"`
+			FeeMas int64  `json:"fee_mas"`
 		}
 		body, _ := io.ReadAll(r.Body)
 		if err := json.Unmarshal(body, &in); err != nil || in.ID == "" {
@@ -1549,7 +1638,7 @@ func init() {
 		_ = json.NewEncoder(w).Encode(resp)
 	})
 
-	// Metrics
+	// Metrics (Prometheus)
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -1684,9 +1773,9 @@ func init() {
 				}
 				out := m.Call(nil)[0]
 				switch out.Kind() {
-				case reflect.Int, reflect.Int32, reflect.Int64:
+				case reflect.Int, reflect.Int64, reflect.Int32:
 					return true, out.Int() > 0
-				case reflect.Uint, reflect.Uint32, reflect.Uint64:
+				case reflect.Uint, reflect.Uint64, reflect.Uint32:
 					return true, out.Uint() > 0
 				case reflect.Bool:
 					return true, out.Bool()
@@ -1756,9 +1845,8 @@ func init() {
 	)
 }
 
-// /tx : POST는 전송, GET은 조회로 강제 분기
+// /tx : POST 전송, GET 조회
 func txHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("[/tx] hit:", r.Method) // 임시 로그
 	switch r.Method {
 	case http.MethodPost:
 		txPostHandler(w, r)
@@ -1771,13 +1859,12 @@ func txHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// POST /tx  — 트랜잭션 전송
+// POST /tx
 func txPostHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	// JSON 읽기
 	defer r.Body.Close()
 	var in txPre
 	body, _ := io.ReadAll(r.Body)
@@ -1787,7 +1874,6 @@ func txPostHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// txPre -> tx.Transfer 매핑
 	t := tx.Transfer{
 		Type:         in.Type,
 		From:         in.From,
@@ -1799,7 +1885,6 @@ func txPostHandler(w http.ResponseWriter, r *http.Request) {
 		ExpiryHeight: uint64(in.ExpiryHeight),
 	}
 
-	// 적용 시도
 	if err := eng.ApplyTransfer(t); err != nil {
 		reason := "apply:" + err.Error()
 		rc := eng.StoreReceipt(t, false, reason)
@@ -1813,7 +1898,6 @@ func txPostHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 성공 시 영수증 저장
 	rc := eng.StoreReceipt(t, true, "")
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -1824,7 +1908,7 @@ func txPostHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // ============================
-// R2P list (opaque cursor 없이 단순 최신순)
+// R2P list
 // ============================
 
 func r2pListHandlerOpaque(w http.ResponseWriter, r *http.Request) {
@@ -1899,11 +1983,9 @@ func r2pListHandlerOpaque(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		// 기본은 open만
 		wantStatus = "open"
 	}
 
-	// from/to 필터
 	fromFilter := ""
 	if v := strings.TrimSpace(r.URL.Query().Get("from")); v != "" {
 		if addr, _, _, ok := resolveAddressMaybeAlias(eng, v); ok {
@@ -1921,11 +2003,9 @@ func r2pListHandlerOpaque(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 수집 + 필터 + 정렬
 	r2pMu.Lock()
 	out := make([]*r2pRecord, 0, len(r2pStore))
 	for _, rec := range r2pStore {
-		// role
 		if role == "outbox" && rec.From != ownerAddr {
 			continue
 		}
@@ -1935,11 +2015,9 @@ func r2pListHandlerOpaque(w http.ResponseWriter, r *http.Request) {
 		if role == "all" && !(rec.From == ownerAddr || rec.To == ownerAddr) {
 			continue
 		}
-		// status
 		if wantStatus != "" && rec.Status != wantStatus {
 			continue
 		}
-		// from/to
 		if fromFilter != "" && rec.From != fromFilter {
 			continue
 		}
@@ -1968,14 +2046,12 @@ type bufferingWriter struct {
 }
 
 func (bw *bufferingWriter) Header() http.Header { return bw.header }
-
 func (bw *bufferingWriter) Write(b []byte) (int, error) {
 	if bw.status == 0 {
 		bw.status = http.StatusOK
 	}
 	return bw.body.Write(b)
 }
-
 func (bw *bufferingWriter) WriteHeader(status int) { bw.status = status }
 
 func copyHeader(dst, src http.Header) {
@@ -2150,7 +2226,6 @@ func jsonizeSigErrors(next http.Handler) http.Handler {
 			return
 		}
 
-		// /tx가 아닌 400이면 원본 그대로 통과
 		if cap.status != http.StatusBadRequest {
 			copyHeader(w.Header(), cap.header)
 			if cap.status != 0 {
@@ -2160,7 +2235,6 @@ func jsonizeSigErrors(next http.Handler) http.Handler {
 			return
 		}
 
-		// 400인 경우 실제 reason이 "서명 관련"인지 확인
 		var parsed map[string]any
 		if json.Unmarshal(cap.body.Bytes(), &parsed) == nil {
 			if s, _ := parsed["reason"].(string); s == "bad_signature" ||
@@ -2176,7 +2250,6 @@ func jsonizeSigErrors(next http.Handler) http.Handler {
 			}
 		}
 
-		// 서명 관련이 아니면 원본 400 그대로 넘김
 		copyHeader(w.Header(), cap.header)
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write(cap.body.Bytes())
@@ -2211,7 +2284,6 @@ func precheckFromBinding(next http.Handler) http.Handler {
 	})
 }
 
-// From-PubKey 바인딩(엔진 기반 검증; 리플렉션)
 func precheckFromBindingWith(eng *app.Engine) func(next http.Handler) http.Handler {
 	must := os.Getenv("THOMAS_REQUIRE_FROM_PUBKEY") == "1"
 	return func(next http.Handler) http.Handler {
@@ -2321,8 +2393,7 @@ type pprofG interface {
 	WriteTo(io.Writer, int) error
 }
 
-func pprofGoroutine() pprofG { return pprofLookup("goroutine") }
-
+func pprofGoroutine() pprofG         { return pprofLookup("goroutine") }
 func pprofLookup(name string) pprofG { return noopPprof{} }
 
 type noopPprof struct{}
@@ -2333,7 +2404,6 @@ func (noopPprof) WriteTo(w io.Writer, _ int) error { _, _ = w.Write([]byte(""));
 // 钱包 생성/복구
 // ============================
 
-// POST /wallet/create
 func walletCreateHandler(w http.ResponseWriter, r *http.Request) {
 	setSensitiveNoStoreHeaders(w)
 
@@ -2372,7 +2442,6 @@ func walletCreateHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// POST /wallet/restore
 func walletRestoreHandler(w http.ResponseWriter, r *http.Request) {
 	setSensitiveNoStoreHeaders(w)
 
@@ -2408,6 +2477,7 @@ func walletRestoreHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /tx?hash=...  or  /tx/get?hash=...
+// GET /tx?hash=...  or  /tx/get?hash=...
 func txGetHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
@@ -2427,6 +2497,46 @@ func txGetHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 1) 엔진에서 해시로 영수증 찾기 (가능한 메서드명을 폭넓게 지원)
+	if eng != nil {
+		rv := reflect.ValueOf(eng)
+		cands := []string{
+			"GetReceipt", "ReceiptByHash", "GetReceiptByHash",
+			"LookupReceipt", "FindReceipt", "GetTxReceipt",
+		}
+		for _, name := range cands {
+			m := rv.MethodByName(name)
+			if !m.IsValid() {
+				continue
+			}
+			// (string) -> (X [, bool|error])
+			if m.Type().NumIn() != 1 || m.Type().In(0).Kind() != reflect.String || m.Type().NumOut() == 0 {
+				continue
+			}
+			outs := m.Call([]reflect.Value{reflect.ValueOf(hash)})
+
+			ok := true
+			if len(outs) == 2 {
+				switch v := outs[1].Interface().(type) {
+				case bool:
+					ok = v
+				case error:
+					ok = (v == nil)
+				}
+			}
+			if !ok {
+				continue
+			}
+
+			recMap := toMapFromAny(outs[0].Interface())
+			if len(recMap) > 0 {
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "receipt": recMap})
+				return
+			}
+		}
+	}
+
+	// 2) R2P 저장소에서 찾기 (기존 동작 유지)
 	r2pMu.Lock()
 	for _, rec := range r2pStore {
 		if rec.TxHash != "" && strings.EqualFold(rec.TxHash, hash) {
@@ -2454,11 +2564,11 @@ func txGetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	r2pMu.Unlock()
 
+	// 3) 그래도 없으면 404
 	w.WriteHeader(http.StatusNotFound)
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "not_found"})
 }
 
-// hexLower: bytes → lower hex
 func hexLower(b []byte) string {
 	const hexdigits = "0123456789abcdef"
 	dst := make([]byte, len(b)*2)
