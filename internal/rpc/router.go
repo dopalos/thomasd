@@ -1,4 +1,4 @@
-﻿// internal/rpc/router.go
+// internal/rpc/router.go
 package rpc
 
 import (
