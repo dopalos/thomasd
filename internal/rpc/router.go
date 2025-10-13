@@ -1,4 +1,8 @@
-﻿// internal/rpc/router.go
+﻿  //go:build !light_client
+  // +build !light_client
+
+
+// internal/rpc/router.go
 package rpc
 
 import (

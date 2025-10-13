@@ -1,3 +1,7 @@
+ //go:build !light_client
+ // +build !light_client
+
+
 package rpc
 
 import "net/http"

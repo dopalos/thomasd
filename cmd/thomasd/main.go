@@ -1,4 +1,7 @@
-﻿package main
+﻿//go:build !light_client
+// +build !light_client
+
+package main
 
 import (
 	"log"

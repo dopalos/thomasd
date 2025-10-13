@@ -1,3 +1,7 @@
+ //go:build !light_client
+ // +build !light_client
+
+
 package rpc
 
 // /eternity/* 핸들러가 사용할 프로바이더 (엔진 등)

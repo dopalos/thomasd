@@ -1,3 +1,7 @@
+ //go:build !light_client
+ // +build !light_client
+
+
 // internal/rpc/eternity_handlers.go
 package rpc
 
