@@ -31,3 +31,5 @@ bindings.json
 thomasd_windows_*.zip
 checksums.txt
 thomasd*_dbg.exe*
+
+thomasd_fresh/
