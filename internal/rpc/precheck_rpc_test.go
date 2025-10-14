@@ -1,3 +1,6 @@
+//go:build !light_client
+// +build !light_client
+
 package rpc
 
 import (
@@ -48,7 +51,7 @@ func TestPrecheckFromBinding_PassesWhenMatchOrUnset(t *testing.T) {
 		t.Fatal("next not called on match")
 	}
 
-	// ENV unset ???듦낵
+	// ENV unset ?????궢
 	t.Setenv("THOMAS_PUBKEY_tho1alice", "")
 	called = false
 	w = httptest.NewRecorder()

@@ -1,3 +1,6 @@
+//go:build !light_client
+// +build !light_client
+
 //go:build legacy_penalty
 
 package state_test
