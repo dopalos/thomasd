@@ -35,3 +35,7 @@ thomasd*_dbg.exe*
 thomasd_fresh/
 
 thomasd_fresh/
+# keep Go caches out of repo
+/.gocache/
+/.gomodcache/
+thomasd-0.1.0-light/
