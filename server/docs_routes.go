@@ -23,6 +23,12 @@ func RegisterDocsRoutes(mux *http.ServeMux) {
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
+
+		// 머지 결과 우선, 실패하면 정적 파일로 폴백
+		if data, err := buildMergedOpenAPI(); err == nil {
+			_, _ = w.Write(data)
+			return
+		}
 		_, _ = w.Write(openapiJSON)
 	})
 
@@ -39,7 +45,7 @@ func RegisterDocsRoutes(mux *http.ServeMux) {
 			return
 		}
 
-		// special: merged.json 은 조각들을 합쳐서 즉시 생성
+		// special: merged.json ? 議곌컖?ㅼ쓣 ?⑹퀜??利됱떆 ?앹꽦
 		if name == "merged.json" {
 			data, err := buildMergedOpenAPI()
 			if err != nil {
@@ -52,7 +58,7 @@ func RegisterDocsRoutes(mux *http.ServeMux) {
 			return
 		}
 
-		// 그 외: known dirs 에서 파일 서빙
+		// 洹??? known dirs ?먯꽌 ?뚯씪 ?쒕튃
 		if b, ok := readOpenAPIPart(name); ok {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
@@ -132,11 +138,11 @@ var openAPIDirs = []string{
 }
 
 func readOpenAPIPart(name string) ([]byte, bool) {
-	// 실행 중 working dir 기준 + 상대경로
+	// ?ㅽ뻾 以?working dir 湲곗? + ?곷?寃쎈줈
 	for _, d := range openAPIDirs {
 		fp := filepath.Join(d, name)
 		if b, err := os.ReadFile(fp); err == nil {
-			// BOM 제거 방지: bytes 그대로 전달
+			// BOM ?쒓굅 諛⑹?: bytes 洹몃?濡??꾨떖
 			return b, true
 		}
 	}
@@ -144,7 +150,7 @@ func readOpenAPIPart(name string) ([]byte, bool) {
 }
 
 func buildMergedOpenAPI() ([]byte, error) {
-	// 루트 골격
+	// 猷⑦듃 怨④꺽
 	doc := map[string]interface{}{
 		"openapi": "3.0.3",
 		"info": map[string]interface{}{
@@ -160,7 +166,7 @@ func buildMergedOpenAPI() ([]byte, error) {
 		},
 	}
 
-	parts := []string{"tx.json", "rounds.json", "policy.json", "health.json"}
+	parts := []string{"tx.json", "rounds.json", "policy.json", "health.json", "wallet.json"}
 
 	for _, p := range parts {
 		raw, ok := readOpenAPIPart(p)
@@ -169,13 +175,13 @@ func buildMergedOpenAPI() ([]byte, error) {
 		}
 		var m map[string]interface{}
 		if err := json.Unmarshal(stripBOM(raw), &m); err != nil {
-			// 조각이 깨져 있어도 다른 조각 진행
+			// 議곌컖??源⑥졇 ?덉뼱???ㅻⅨ 議곌컖 吏꾪뻾
 			continue
 		}
 		mergePathsAndSchemas(doc, m)
 	}
 
-	// 안전장치: /health 누락 시 자동 삽입(+ 스키마 보강)
+	// ?덉쟾?μ튂: /health ?꾨씫 ???먮룞 ?쎌엯(+ ?ㅽ궎留?蹂닿컯)
 	ensureHealth(doc)
 
 	out, err := json.MarshalIndent(doc, "", "  ")
@@ -190,7 +196,7 @@ func mergePathsAndSchemas(dst, src map[string]interface{}) {
 	if sp, ok := src["paths"].(map[string]interface{}); ok {
 		dp := getMap(dst, "paths")
 		for k, v := range sp {
-			// 충돌 시 src 우선 덮어쓰기
+			// 異⑸룎 ??src ?곗꽑 ??뼱?곌린
 			dp[k] = v
 		}
 		dst["paths"] = dp
@@ -214,7 +220,7 @@ func ensureHealth(doc map[string]interface{}) {
 	if _, ok := paths["/health"]; ok {
 		return
 	}
-	// 스키마 보강
+	// ?ㅽ궎留?蹂닿컯
 	components := getMap(doc, "components")
 	schemas := getMap(components, "schemas")
 	if _, ok := schemas["HealthResponse"]; !ok {
@@ -268,7 +274,7 @@ func getMap(m map[string]interface{}, key string) map[string]interface{} {
 }
 
 func stripBOM(b []byte) []byte {
-	// UTF-8 BOM 제거
+	// UTF-8 BOM ?쒓굅
 	if len(b) >= 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF {
 		return b[3:]
 	}

@@ -1,160 +1,151 @@
-﻿// cmd/thomasd/main.go
+﻿//go:build !light_client
+// +build !light_client
+
 package main
 
 import (
-	"context"
-	"encoding/json"
-	"flag"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
+	"path/filepath"
+	"strings"
+	"sync"
+	app "thomasd/internal/app"
+	rpc "thomasd/internal/rpc"
+	server "thomasd/server"
 	"time"
 )
 
-// --- version info (ldflags) ---
-var (
-	version = "dev"
-	commit  = "none"
-	date    = "unknown"
-)
+var releaseBuild = "dev" // ldflags로 prod로 바꿀 수 있음
 
-// NOTE: GitHub Actions에서 아래 변수에 ldflags로 주입합니다.
-// go build -ldflags "-s -w -X main.version=${TAG}"
-
-// 추가: 런타임 플래그가 참조하는 전역 변수(원본 유지 + 누락 보강)
-var (
-	showVersion bool
-	addr        string
-	healthPath  string
-)
-
-func init() {
-	// Go의 flag 패키지는 -flag 와 --flag 둘 다 인식합니다.
-	flag.BoolVar(&showVersion, "version", false, "print version and exit")
-	flag.BoolVar(&showVersion, "v", false, "print version and exit (shorthand)")
-	flag.StringVar(&addr, "addr", ":8081", "listen address (e.g. :8081 or 127.0.0.1:8081)")
-	flag.StringVar(&healthPath, "health-path", "/health", "health check HTTP path")
+func withCORS(h http.Handler) http.Handler {
+	// 허용 Origin만 여기에 등록
+	allowed := map[string]bool{
+		"http://localhost:5174": true, // 개발
+		// "https://app.example.com": true, // 운영 도메인 추가
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		o := r.Header.Get("Origin")
+		if o != "" && allowed[o] {
+			w.Header().Set("Access-Control-Allow-Origin", o)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-PubKey, X-Sig")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		} else if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
-func main() {
-	flag.Parse()
+// ---- Rate limit for /wallet/restore ----
+type rateBucket struct {
+	tokens int
+	last   time.Time
+}
 
-	if showVersion {
-		fmt.Println(version)
-		return
+var (
+	rlMu sync.Mutex
+	rl   = map[string]*rateBucket{}
+)
+
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+func withRateLimitRestore(h http.Handler, rpm int) http.Handler {
+	refill := func(b *rateBucket) {
+		now := time.Now()
+		if b.last.IsZero() {
+			b.last = now
+			return
+		}
+		elapsed := now.Sub(b.last)
+		add := int(elapsed.Minutes() * float64(rpm))
+		if add > 0 {
+			if b.tokens+add > rpm {
+				b.tokens = rpm
+			} else {
+				b.tokens += add
+			}
+			b.last = now
+		}
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/wallet/restore") {
+			ip := clientIP(r)
+			rlMu.Lock()
+			b := rl[ip]
+			if b == nil {
+				b = &rateBucket{tokens: rpm, last: time.Now()}
+				rl[ip] = b
+			}
+			refill(b)
+			if b.tokens <= 0 {
+				rlMu.Unlock()
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"ok":false,"error":"rate_limited"}`))
+				return
+			}
+			b.tokens--
+			rlMu.Unlock()
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+// ---- main ----
+func main() {
+	// 🚨 운영 보호
+	if os.Getenv("THOMAS_ENV") == "prod" && os.Getenv("THOMAS_DEV_FREE_R2P") == "1" {
+		log.Fatal("REFUSING TO START: THOMAS_DEV_FREE_R2P=1 in production (THOMAS_ENV=prod)")
+	}
+	if releaseBuild == "prod" && os.Getenv("THOMAS_DEV_FREE_R2P") == "1" {
+		log.Fatal("REFUSING TO START: THOMAS_DEV_FREE_R2P=1 in release build")
+	}
+	if os.Getenv("THOMAS_DEV_FREE_R2P") == "1" {
+		log.Println("!!! DANGER: THOMAS_DEV_FREE_R2P is ENABLED (dev only). This bypasses balance checks.")
 	}
 
+	// 1) mux 생성
 	mux := http.NewServeMux()
 
-	// /health 응답: {"status":"ok","version":"vX.Y.Z","time":"..."}
-	mux.HandleFunc(healthPath, func(w http.ResponseWriter, r *http.Request) {
-		type Health struct {
-			Status  string `json:"status"`
-			Version string `json:"version"`
-			Time    string `json:"time"`
-		}
-		resp := Health{
-			Status:  "ok",
-			Version: version,
-			Time:    time.Now().UTC().Format(time.RFC3339),
-		}
-		writeJSON(w, http.StatusOK, resp)
-	})
+	engine := app.NewEngine()
+	rpc.SetEngine(engine)
 
-	// 루트 페이지(선택)
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		type Info struct {
-			Name    string `json:"name"`
-			Version string `json:"version"`
-			Health  string `json:"health"`
-		}
-		writeJSON(w, http.StatusOK, Info{
-			Name:    "thomasd (Thomas Chain)",
-			Version: version,
-			Health:  healthPath,
-		})
-	})
+	// 2) R2P 파일 경로
+	exe, _ := os.Executable()
+	base := filepath.Dir(exe)
+	rpc.SetR2PStorage(filepath.Join(base, "data", "r2p.json"))
+	rpc.SetR2PStorage("data/r2p.json")
 
-	srv := &http.Server{
-		Addr:         addr,
-		Handler:      loggingMiddleware(mux),
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
-	}
+	// 4) 문서 라우트 ( /openapi.json , /openapi/* , /docs )
+	server.RegisterDocsRoutes(mux)
 
-	// 서버 시작
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
-		}
-	}()
+	// 5) 기존 RPC 라우터만 연결
+	h := rpc.Handler()
+	h = withRateLimitRestore(h, 5)
+	h = withCORS(h)
+	mux.Handle("/", h)
 
-	// 기존 로그 스타일 유지
+	// 6) 공통 미들웨어(CORS, /wallet/restore rate limit)
+	root := withCORS(withRateLimitRestore(mux, 5))
+
+	// 7) 서버 시작
+	addr := ":8081"
 	log.Printf("thomasd (Thomas Chain) listening on %s", addr)
-
-	// SIGINT/SIGTERM 그레이스풀 셧다운 (보강: SIGTERM 추가)
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
-	<-quit
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	log.Printf("shutting down ...")
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Printf("graceful shutdown failed: %v", err)
-		_ = srv.Close()
+	if err := http.ListenAndServe(addr, root); err != nil && err != http.ErrServerClosed {
+		log.Fatal(err)
 	}
-	log.Printf("bye")
-}
-
-// ------------ helpers ------------
-
-func writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-type statusWriter struct {
-	http.ResponseWriter
-	status int
-	bytes  int
-}
-
-func (w *statusWriter) WriteHeader(code int) {
-	w.status = code
-	w.ResponseWriter.WriteHeader(code)
-}
-
-func (w *statusWriter) Write(b []byte) (int, error) {
-	if w.status == 0 {
-		w.status = http.StatusOK
-	}
-	n, err := w.ResponseWriter.Write(b)
-	w.bytes += n
-	return n, err
-}
-
-func loggingMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sw := &statusWriter{ResponseWriter: w}
-		start := time.Now()
-
-		remote := r.RemoteAddr
-		if host, _, err := net.SplitHostPort(remote); err == nil {
-			remote = host
-		}
-
-		next.ServeHTTP(sw, r)
-
-		dur := time.Since(start)
-		log.Printf("%s %s %d %dB %s from %s",
-			r.Method, r.URL.Path, sw.status, sw.bytes, dur.Truncate(time.Millisecond), remote)
-	})
 }

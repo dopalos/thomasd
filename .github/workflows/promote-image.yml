@@ -1,59 +1,84 @@
 ﻿name: promote-image
 
 on:
+  workflow_run:
+    workflows: ["docker-build-push"]
+    types: [completed]
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
-      from:
-        description: "Source tag (already exists, e.g. ci-20250909131211)"
-        required: true
-        type: string
-      tags:
-        description: "Comma-separated target tags (e.g. latest,v0.1.26)"
-        required: true
-        type: string
+      from_tag:
+        description: 'Source tag'
+        default: 'candidate'
+      to_tags:
+        description: 'Destination tags (comma-separated)'
+        default: 'latest'
 
 permissions:
   contents: read
   packages: write
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
-  retag:
+  on-build-success:
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
-      - name: Login to GHCR (GITHUB_TOKEN)
-        uses: docker/login-action@v3
+      - uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Check source image exists
-        shell: bash
+      - name: Promote candidate -> latest
         run: |
-          set -euo pipefail
-          SRC="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.from }}"
-          echo "Inspect $SRC"
-          docker buildx imagetools inspect "$SRC" >/dev/null
-          echo "OK"
+          docker buildx imagetools create --tag "${IMAGE}:latest" "${IMAGE}:candidate"
+          A=$(docker buildx imagetools inspect "${IMAGE}:candidate" --format "{{ .Manifest.Digest }}")
+          B=$(docker buildx imagetools inspect "${IMAGE}:latest"     --format "{{ .Manifest.Digest }}")
+          echo "candidate=$A"; echo "latest=$B"; test "$A" = "$B"
 
-      - name: Promote tags without rebuild
-        shell: bash
+  on-release:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote candidate -> latest & vX.Y.Z
+        env:
+          REL_TAG: ${{ github.event.release.tag_name }}
         run: |
-          set -euo pipefail
-          SRC="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.from }}"
-          IFS=',' read -ra TARGETS <<< "${{ inputs.tags }}"
-          for t in "${TARGETS[@]}"; do
-            t="$(echo "$t" | xargs)"
-            [ -n "$t" ] || continue
-            DST="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$t"
-            echo ">> $SRC  ->  $DST"
-            docker buildx imagetools create --tag "$DST" "$SRC"
-          done
-          echo "done."
+          docker buildx imagetools create \
+            --tag "${IMAGE}:latest" \
+            --tag "${IMAGE}:${REL_TAG}" \
+            "${IMAGE}:candidate"
+
+          C=$(docker buildx imagetools inspect "${IMAGE}:candidate" --format "{{ .Manifest.Digest }}")
+          L=$(docker buildx imagetools inspect "${IMAGE}:latest"     --format "{{ .Manifest.Digest }}")
+          V=$(docker buildx imagetools inspect "${IMAGE}:${REL_TAG}" --format "{{ .Manifest.Digest }}")
+          echo "candidate=$C"; echo "latest=$L"; echo "${REL_TAG}=$V"; test "$C" = "$L" -a "$C" = "$V"
+
+  manual:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote manual
+        env:
+          FROM: ${{ inputs.from_tag }}
+          TO:   ${{ inputs.to_tags }}
+        run: |
+          IFS=',' read -ra T <<< "$TO"
+          TAG_ARGS=()
+          for t in "${T[@]}"; do t=$(echo "$t" | xargs); [ -n "$t" ] && TAG_ARGS+=( --tag "${IMAGE}:${t}" ); done
+          docker buildx imagetools create "${TAG_ARGS[@]}" "${IMAGE}:${FROM}"

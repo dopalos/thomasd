@@ -1,0 +1,92 @@
+{
+  "paths": {
+    "/wallet/create": {
+      "post": {
+        "summary": "Create wallet and return recovery mnemonic (shown once)",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "passphrase": { "type": "string", "description": "Optional BIP39 passphrase" },
+                  "label": { "type": "string", "description": "Optional client label (ignored by server)" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["ok", "algo", "pubkey_hex", "recovery"],
+                  "properties": {
+                    "ok": { "type": "boolean" },
+                    "algo": { "type": "string", "enum": ["ed25519"] },
+                    "pubkey_hex": { "type": "string" },
+                    "note": { "type": "string" },
+                    "recovery": {
+                      "type": "object",
+                      "required": ["mnemonic", "fingerprint", "passphrase_used"],
+                      "properties": {
+                        "mnemonic": { "type": "string", "description": "12-word phrase. Show once; do NOT store." },
+                        "fingerprint": { "type": "string", "description": "Short identifier (first 4 bytes of SHA-256 mnemonic)" },
+                        "passphrase_used": { "type": "boolean" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/wallet/restore": {
+      "post": {
+        "summary": "Restore wallet pubkey from recovery mnemonic",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["mnemonic"],
+                "properties": {
+                  "mnemonic": { "type": "string" },
+                  "passphrase": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Restored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["ok", "algo", "pubkey_hex"],
+                  "properties": {
+                    "ok": { "type": "boolean" },
+                    "algo": { "type": "string", "enum": ["ed25519"] },
+                    "pubkey_hex": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        }
+      }
+    }
+  }
+}

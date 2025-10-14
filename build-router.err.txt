@@ -1,0 +1,12 @@
+# thomasd/internal/rpc
+internal\rpc\router.go:222:1: syntax error: unexpected ., expected }
+internal\rpc\router.go:227:80: method has multiple receivers
+internal\rpc\router.go:227:80: syntax error: unexpected {, expected name
+internal\rpc\router.go:238:37: newline in string
+internal\rpc\router.go:238:37: syntax error: unexpected newline in argument list; possibly missing comma or )
+internal\rpc\router.go:239:2: syntax error: unexpected ) after top level declaration
+internal\rpc\router.go:240:11: newline in string
+internal\rpc\router.go:262:76: method has multiple receivers
+internal\rpc\router.go:262:76: syntax error: unexpected {, expected name
+internal\rpc\router.go:272:3: syntax error: unexpected ) after top level declaration
+internal\rpc\router.go:272:3: too many errors
