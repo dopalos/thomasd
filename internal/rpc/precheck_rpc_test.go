@@ -51,8 +51,7 @@ func TestPrecheckFromBinding_PassesWhenMatchOrUnset(t *testing.T) {
 		t.Fatal("next not called on match")
 	}
 
-	// ENV unset ?????궢
-	t.Setenv("THOMAS_PUBKEY_tho1alice", "")
+	// ENV unset ?????沅?	t.Setenv("THOMAS_PUBKEY_tho1alice", "")
 	called = false
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req(`{"from":"tho1alice"}`, "ANY"))

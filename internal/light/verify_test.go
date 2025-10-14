@@ -1,9 +1,6 @@
 //go:build !light_client
 // +build !light_client
 
-  //go:build light_client
-  // +build light_client
-
 package light
 
 import (
