@@ -1,0 +1,62 @@
+name: light-smoke (CI)
+
+on:
+  workflow_dispatch:
+    inputs:
+      digest:
+        description: "Router image digest (e.g. sha256:46ef?ea051)"
+        required: true
+        type: string
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull image by digest
+        run: |
+          docker pull ghcr.io/dopalos/thomasd@${{ inputs.digest }}
+
+      - name: Run router (bg)
+        run: |
+          docker run -d --name lrouter -p 8081:8081 ghcr.io/dopalos/thomasd@${{ inputs.digest }}
+          sleep 2
+          docker logs lrouter > router.log 2>&1 || true
+
+      - name: Metrics BEFORE
+        run: |
+          curl -sf http://127.0.0.1:8081/metrics | tee metrics_before.txt
+
+      - name: Smoke (PowerShell)
+        shell: pwsh
+        run: |
+          ./scripts/smoke-light.ps1 -Base http://127.0.0.1:8081 -MinFeeMas 1 *>&1 | Tee-Object -FilePath smoke.log
+
+      - name: Metrics AFTER
+        run: |
+          curl -sf http://127.0.0.1:8081/metrics | tee metrics_after.txt
+          diff -u metrics_before.txt metrics_after.txt > metrics_diff.txt || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: light-smoke-artifacts
+          path: |
+            smoke.log
+            router.log
+            metrics_before.txt
+            metrics_after.txt
+            metrics_diff.txt
+          if-no-files-found: warn
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f lrouter || true
