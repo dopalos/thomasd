@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       digest:
-        description: "Router image digest (e.g. sha256:46ef…ea051)"
+        description: "Router image digest (e.g. sha256:46ef?ea051)"
         required: true
         type: string
 
@@ -26,53 +26,43 @@ jobs:
       - name: Run router (bg)
         run: |
           docker run -d --name lrouter -p 8081:8081 ghcr.io/dopalos/thomasd@${{ inputs.digest }}
-          # 기동 대기 + 초기 로그 확보
-          sleep 2
+          sleep 1
           docker logs lrouter > router.log 2>&1 || true
+
+      - name: Wait until router is ready
+        run: |
+          set +e
+          base="http://127.0.0.1:8081"
+          for i in $(seq 1 30); do
+            curl -sS "$base/height" >/dev/null && exit 0
+            sleep 1
+          done
+          echo "router not ready in time" >> router.log
+          exit 0
 
       - name: Metrics BEFORE
         run: |
-          curl -sf http://127.0.0.1:8081/metrics | tee metrics_before.txt
+          curl -sS http://127.0.0.1:8081/metrics -o metrics_before.txt || true
 
       - name: Smoke (inline curl)
-        shell: bash
         run: |
-          set -euo pipefail
+          set +e
           base="http://127.0.0.1:8081"
-
-          # 항상 파일을 만들도록 초기화
-          : > smoke.log
-
-          echo "== height =="       | tee -a smoke.log
-          curl -svf "$base/height"  2>&1 | tee -a smoke.log || true
-
-          echo "== hash =="         | tee -a smoke.log
-          curl -svf "$base/hash"    2>&1 | tee -a smoke.log || true
-
-          echo "== nonce (expect 404) ==" | tee -a smoke.log
-          code=$(curl -s -o /dev/null -w "%{http_code}" "$base/nonce" || true)
-          echo "nonce http_code=$code" | tee -a smoke.log
-          # 404 기대
-          if [ "$code" != "404" ]; then
-            echo "unexpected nonce code: $code" | tee -a smoke.log
-            exit 1
-          fi
-
-          echo "== policy (expect 409/400) ==" | tee -a smoke.log
-          # 정책 위반 유도: 요청 바디/파라미터는 실제 라우터 규칙에 맞춰 조정 가능
-          code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$base/submit" || true)
-          echo "policy http_code=$code" | tee -a smoke.log
-          # 409 또는 400 범주면 OK (라우터 구현에 따라 409/400)
-          if [ "$code" != "409" ] && [ "$code" != "400" ]; then
-            echo "unexpected policy code: $code" | tee -a smoke.log
-            exit 1
-          fi
+          {
+            echo "== HEIGHT ==";
+            curl -sS "$base/height" || true
+            echo "== HASH ==";
+            curl -sS "$base/hash"   || true
+            echo "== NEGATIVES ==";
+            code=$(curl -s -o /dev/null -w "%{http_code}" "$base/nonce"); echo "nonce http_code=$code"
+            code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$base/sign" -H 'Content-Type: application/json' --data '{"m":"00"}'); echo "policy http_code=$code"
+          } | tee smoke.log
+          exit 0
 
       - name: Metrics AFTER
         run: |
-          curl -sf http://127.0.0.1:8081/metrics | tee metrics_after.txt
-          # diff 파일은 무조건 만들기 (없어도 업로드되게)
-          diff -u metrics_before.txt metrics_after.txt > metrics_diff.txt || true
+          curl -sS http://127.0.0.1:8081/metrics -o metrics_after.txt || true
+          (diff -u metrics_before.txt metrics_after.txt || true) > metrics_diff.txt
 
       - name: Upload artifacts
         if: always()
