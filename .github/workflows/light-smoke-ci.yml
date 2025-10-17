@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       digest:
-        description: "Router image digest (e.g. sha256:46ef?ea051)"
+        description: "Router image digest (e.g. sha256:46ef...ea051)"
         required: true
         type: string
 
@@ -19,50 +19,101 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Init empty artifacts (always exist)
+        run: |
+          : > smoke.log
+          : > router.log
+          : > metrics_before.txt
+          : > metrics_after.txt
+          : > metrics_diff.txt
+          : > image_probe.txt
+
       - name: Pull image by digest
         run: |
+          set -e
           docker pull ghcr.io/dopalos/thomasd@${{ inputs.digest }}
 
-      - name: Run router (bg)
+      - name: Probe image contents
         run: |
-          docker run -d --name lrouter -p 8081:8081 ghcr.io/dopalos/thomasd@${{ inputs.digest }}
-          sleep 1
+          set -e
+          docker run --rm --entrypoint /bin/sh ghcr.io/dopalos/thomasd@${{ inputs.digest }} -lc '
+            set -x
+            uname -a
+            command -v lightrouter || true
+            command -v thomasd     || true
+            ls -l /usr/local/bin   || true
+            /usr/local/bin/thomasd --help || true
+          ' | tee image_probe.txt
+
+      - name: Run router (bg) with ENTRYPOINT override
+        env:
+          THOMASD_MIN_FEE_MAS: "1"
+          THOMASD_ADDR: ":8081"
+        run: |
+          set -e
+          docker run -d --name lrouter -p 8081:8081 \
+            -e THOMASD_MIN_FEE_MAS -e THOMASD_ADDR \
+            --entrypoint /bin/sh \
+            ghcr.io/dopalos/thomasd@${{ inputs.digest }} \
+            -lc '
+              set -e
+              if command -v lightrouter >/dev/null 2>&1; then
+                exec lightrouter -min-fee-mas "$THOMASD_MIN_FEE_MAS" -listen "$THOMASD_ADDR"
+              elif command -v thomasd >/dev/null 2>&1; then
+                echo "WARN: lightrouter not found; only thomasd present. Router mode may be missing." >&2
+                /usr/local/bin/thomasd --help || true
+                echo "FATAL: router entrypoint not found (no lightrouter; thomasd has no router mode)" >&2
+                sleep 2
+                exit 2
+              else
+                echo "FATAL: neither lightrouter nor thomasd found in image" >&2
+                sleep 2
+                exit 2
+              fi
+            '
           docker logs lrouter > router.log 2>&1 || true
 
-      - name: Wait until router is ready
+      - name: Wait until router is ready (max 30s)
         run: |
           set +e
-          base="http://127.0.0.1:8081"
           for i in $(seq 1 30); do
-            curl -sS "$base/height" >/dev/null && exit 0
+            curl -sf http://127.0.0.1:8081/height >/dev/null && ready=1 && break
             sleep 1
           done
-          echo "router not ready in time" >> router.log
-          exit 0
+          docker logs lrouter > router.log 2>&1 || true
+          if [ "$ready" != "1" ]; then
+            echo "router not ready in time" >> router.log
+            exit 1
+          fi
 
       - name: Metrics BEFORE
         run: |
-          curl -sS http://127.0.0.1:8081/metrics -o metrics_before.txt || true
+          curl -s http://127.0.0.1:8081/metrics | tee metrics_before.txt || true
 
       - name: Smoke (inline curl)
         run: |
-          set +e
+          set -e
           base="http://127.0.0.1:8081"
-          {
-            echo "== HEIGHT ==";
-            curl -sS "$base/height" || true
-            echo "== HASH ==";
-            curl -sS "$base/hash"   || true
-            echo "== NEGATIVES ==";
-            code=$(curl -s -o /dev/null -w "%{http_code}" "$base/nonce"); echo "nonce http_code=$code"
-            code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$base/sign" -H 'Content-Type: application/json' --data '{"m":"00"}'); echo "policy http_code=$code"
-          } | tee smoke.log
-          exit 0
 
-      - name: Metrics AFTER
+          echo "== HEIGHT ==" | tee -a smoke.log
+          curl -v -sf "$base/height" | tee -a smoke.log || true
+
+          echo "== HASH ==" | tee -a smoke.log
+          curl -v -sf "$base/hash"   | tee -a smoke.log || true
+
+          echo "== NEGATIVES ==" | tee -a smoke.log
+          code=$(curl -s -o /dev/null -w "%{http_code}" "$base/nonce")
+          echo "nonce http_code=$code"  | tee -a smoke.log
+
+          code=$(curl -s -o /dev/null -w "%{http_code}" "$base/policy?min_fee_mas=0")
+          echo "policy http_code=$code" | tee -a smoke.log
+
+      - name: Metrics AFTER & diff
         run: |
-          curl -sS http://127.0.0.1:8081/metrics -o metrics_after.txt || true
-          (diff -u metrics_before.txt metrics_after.txt || true) > metrics_diff.txt
+          set +e
+          sleep 1
+          curl -s http://127.0.0.1:8081/metrics | tee metrics_after.txt || true
+          diff -u metrics_before.txt metrics_after.txt > metrics_diff.txt || true
 
       - name: Upload artifacts
         if: always()
@@ -70,6 +121,7 @@ jobs:
         with:
           name: light-smoke-artifacts
           path: |
+            image_probe.txt
             smoke.log
             router.log
             metrics_before.txt
