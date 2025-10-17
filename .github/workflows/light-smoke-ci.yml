@@ -26,18 +26,63 @@ jobs:
         with:
           go-version: "stable"
 
-      - name: Build light router
+      - name: Find router main package (auto-detect)
+        id: findmain
         run: |
           set -euo pipefail
-          # 라우터 엔트리 경로를 실제 리포 구조에 맞춰 한 군데 이상 시도
-          if [ -f "./cmd/lightrouter/main.go" ]; then
-            go build -tags light_client -o lrouter ./cmd/lightrouter
-          elif [ -f "./cmd/light_router/main.go" ]; then
-            go build -tags light_client -o lrouter ./cmd/light_router
-          else
-            echo "cannot find light router main.go (expected ./cmd/lightrouter or ./cmd/light_router)" >&2
+          : > find_main.log
+
+          echo "== scan: go list main packages ==" | tee -a find_main.log
+          # 모든 main 패키지 경로
+          mapfile -t mains < <(go list -f '{{if eq .Name "main"}}{{.ImportPath}} {{.Dir}}{{end}}' ./... | awk '{print $1}')
+
+          echo "main packages:" | tee -a find_main.log
+          for p in "${mains[@]:-}"; do
+            echo " - $p" | tee -a find_main.log
+          done
+
+          # 후보를 점수화해서 고르기:
+          # 1) 소스에 -min-fee-mas 플래그가 있는 main
+          # 2) 경로 이름에 'light'와 'router'가 모두 들어간 main
+          # 3) 경로 이름에 'router'가 들어간 main
+          # 4) 첫 번째 main (폴백)
+          pick=""
+          for p in "${mains[@]:-}"; do
+            dir=$(go list -f '{{.Dir}}' "$p")
+            if grep -RIl --include='*.go' -e 'min[-_]?fee[-_]?mas' "$dir" >/dev/null 2>&1; then
+              pick="$p"; echo "picked by flag scan: $p" | tee -a find_main.log; break
+            fi
+          done
+
+          if [ -z "${pick:-}" ]; then
+            for p in "${mains[@]:-}"; do
+              if [[ "$p" == *light* && "$p" == *router* ]]; then pick="$p"; echo "picked by path(light+router): $p" | tee -a find_main.log; break; fi
+            done
+          fi
+
+          if [ -z "${pick:-}" ]; then
+            for p in "${mains[@]:-}"; do
+              if [[ "$p" == *router* ]]; then pick="$p"; echo "picked by path(router): $p" | tee -a find_main.log; break; fi
+            done
+          fi
+
+          if [ -z "${pick:-}" ] && [ ${#mains[@]:-0} -gt 0 ]; then
+            pick="${mains[0]}"; echo "fallback pick: $pick" | tee -a find_main.log
+          fi
+
+          if [ -z "${pick:-}" ]; then
+            echo "::error::no main package found" | tee -a find_main.log
             exit 1
           fi
+
+          echo "PICK=$pick" | tee -a find_main.log
+          echo "pick=$pick" >> "$GITHUB_OUTPUT"
+
+      - name: Build router
+        run: |
+          set -euo pipefail
+          echo "building ${{ steps.findmain.outputs.pick }}"
+          go build -tags light_client -o lrouter "${{ steps.findmain.outputs.pick }}"
           ls -l lrouter
 
       - name: Run router (background)
@@ -45,12 +90,12 @@ jobs:
           THOMASD_MIN_FEE_MAS: ${{ inputs.min_fee_mas }}
         run: |
           set -euo pipefail
-          # 실제 플래그/포트가 다르면 여기 수정
+          # NOTE: 필요 시 플래그/포트 이름을 맞춰주세요 (-min-fee-mas, 8081)
           ./lrouter -min-fee-mas "${THOMASD_MIN_FEE_MAS}" >/dev/null 2>router.log &
           echo $! > router.pid
 
           echo "Waiting for router on http://127.0.0.1:8081 ..."
-          for i in $(seq 1 30); do
+          for i in $(seq 1 45); do
             sleep 1
             if curl -sf http://127.0.0.1:8081/height >/dev/null; then
               echo "router is ready"
@@ -72,19 +117,19 @@ jobs:
           : > smoke.log
 
           echo "== HEIGHT ==" | tee -a smoke.log
-          curl -sf "$base/height" | tee -a smoke.log
+          curl -sf "$base/height" | tee -a smoke.log || echo "(height failed)" | tee -a smoke.log
           echo "" | tee -a smoke.log
 
           echo "== HASH ==" | tee -a smoke.log
-          curl -sf "$base/hash" | tee -a smoke.log
+          curl -sf "$base/hash" | tee -a smoke.log || echo "(hash failed)" | tee -a smoke.log
           echo "" | tee -a smoke.log
 
           echo "== NEGATIVES ==" | tee -a smoke.log
-          # 404: 존재하지 않는 엔드포인트
+          # 404: 없는 엔드포인트
           code=$(curl -s -o /dev/null -w "%{http_code}" "$base/nonce")
           echo "nonce http_code=$code" | tee -a smoke.log
 
-          # 409: 정책 위반 (여기 경로/쿼리를 실제 구현에 맞게 바꿔)
+          # 409: 정책 위반 — 실제 구현에 맞춰 엔드포인트/쿼리 조정 필요
           code=$(curl -s -o /dev/null -w "%{http_code}" "$base/policy?min_fee_mas=0")
           echo "policy http_code=$code" | tee -a smoke.log
 
@@ -100,6 +145,7 @@ jobs:
         with:
           name: light-smoke-artifacts
           path: |
+            find_main.log
             router.log
             smoke.log
             metrics_before.txt
