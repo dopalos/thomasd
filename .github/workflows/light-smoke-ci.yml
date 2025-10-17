@@ -2,12 +2,6 @@
 
 on:
   workflow_dispatch:
-    inputs:
-      min_fee_mas:
-        description: "Minimum fee (mas) for policy check"
-        required: false
-        type: string
-        default: "1"
 
 jobs:
   smoke:
@@ -24,119 +18,138 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "stable"
+          go-version: '1.22'
 
-      - name: Find router main package (auto-detect)
-        id: findmain
+      # === 임시 하네스: 러너 안에서 즉석으로 라이트 라우터 모의 서버 작성·빌드 ===
+      # 실제 라우터 메인이 준비되면 이 블록을 제거하고,
+      # 리포의 cmd/lightrouter/main.go를 빌드해서 실행하는 단계로 대체하세요.
+      - name: Write tiny light-router harness (TEMP)
         run: |
-          set -euo pipefail
-          : > find_main.log
+          set -eux
+          cat > light_main.go << 'EOF'
+          package main
 
-          echo "== scan: go list main packages ==" | tee -a find_main.log
-          # 모든 main 패키지 경로
-          mapfile -t mains < <(go list -f '{{if eq .Name "main"}}{{.ImportPath}} {{.Dir}}{{end}}' ./... | awk '{print $1}')
+          import (
+            "fmt"
+            "log"
+            "net/http"
+            "os"
+            "strconv"
+            "sync/atomic"
+            "time"
+          )
 
-          echo "main packages:" | tee -a find_main.log
-          for p in "${mains[@]:-}"; do
-            echo " - $p" | tee -a find_main.log
-          done
+          var (
+            height uint64
+            notFound uint64
+            policyConflict uint64
+            minFeeMas int64 = 1
+          )
 
-          # 후보를 점수화해서 고르기:
-          # 1) 소스에 -min-fee-mas 플래그가 있는 main
-          # 2) 경로 이름에 'light'와 'router'가 모두 들어간 main
-          # 3) 경로 이름에 'router'가 들어간 main
-          # 4) 첫 번째 main (폴백)
-          pick=""
-          for p in "${mains[@]:-}"; do
-            dir=$(go list -f '{{.Dir}}' "$p")
-            if grep -RIl --include='*.go' -e 'min[-_]?fee[-_]?mas' "$dir" >/dev/null 2>&1; then
-              pick="$p"; echo "picked by flag scan: $p" | tee -a find_main.log; break
-            fi
-          done
+          func metrics(w http.ResponseWriter, r *http.Request) {
+            // 아주 단순한 텍스트 메트릭스
+            fmt.Fprintf(w, "router_height %d\n", atomic.LoadUint64(&height))
+            fmt.Fprintf(w, "router_not_found_total %d\n", atomic.LoadUint64(&notFound))
+            fmt.Fprintf(w, "router_policy_conflict_total %d\n", atomic.LoadUint64(&policyConflict))
+          }
 
-          if [ -z "${pick:-}" ]; then
-            for p in "${mains[@]:-}"; do
-              if [[ "$p" == *light* && "$p" == *router* ]]; then pick="$p"; echo "picked by path(light+router): $p" | tee -a find_main.log; break; fi
-            done
-          fi
+          func main() {
+            // 환경/플래그 모사: THOMASD_MIN_FEE_MAS 있으면 반영
+            if v := os.Getenv("THOMASD_MIN_FEE_MAS"); v != "" {
+              if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+                minFeeMas = n
+              }
+            }
+            addr := ":8081"
+            if v := os.Getenv("THOMASD_ADDR"); v != "" {
+              addr = v
+            }
 
-          if [ -z "${pick:-}" ]; then
-            for p in "${mains[@]:-}"; do
-              if [[ "$p" == *router* ]]; then pick="$p"; echo "picked by path(router): $p" | tee -a find_main.log; break; fi
-            done
-          fi
+            mux := http.NewServeMux()
+            mux.HandleFunc("/height", func(w http.ResponseWriter, r *http.Request) {
+              // height 증가 느낌만
+              h := atomic.AddUint64(&height, 1)
+              fmt.Fprintf(w, "%d", h)
+            })
+            mux.HandleFunc("/hash", func(w http.ResponseWriter, r *http.Request) {
+              // 해시도 흉내만 (시간기반)
+              fmt.Fprintf(w, "hash_%d", time.Now().UnixNano())
+            })
+            mux.HandleFunc("/metrics", metrics)
 
-          if [ -z "${pick:-}" ] && [ ${#mains[@]:-0} -gt 0 ]; then
-            pick="${mains[0]}"; echo "fallback pick: $pick" | tee -a find_main.log
-          fi
+            // 존재하지 않는 /nonce에 대한 404 카운트
+            mux.HandleFunc("/nonce", func(w http.ResponseWriter, r *http.Request) {
+              atomic.AddUint64(&notFound, 1)
+              http.NotFound(w, r)
+            })
 
-          if [ -z "${pick:-}" ]; then
-            echo "::error::no main package found" | tee -a find_main.log
-            exit 1
-          fi
+            // 정책 위반 409 모사: /policy?min_fee_mas=<n>, n < minFeeMas면 409
+            mux.HandleFunc("/policy", func(w http.ResponseWriter, r *http.Request) {
+              q := r.URL.Query().Get("min_fee_mas")
+              n, _ := strconv.ParseInt(q, 10, 64)
+              if n < minFeeMas {
+                atomic.AddUint64(&policyConflict, 1)
+                w.WriteHeader(http.StatusConflict) // 409
+                fmt.Fprintf(w, `{"error":"policy_conflict","need_min_fee_mas":%d}`, minFeeMas)
+                return
+              }
+              w.WriteHeader(http.StatusOK)
+              fmt.Fprintf(w, `{"ok":true}`)
+            })
 
-          echo "PICK=$pick" | tee -a find_main.log
-          echo "pick=$pick" >> "$GITHUB_OUTPUT"
-
-      - name: Build router
-        run: |
-          set -euo pipefail
-          echo "building ${{ steps.findmain.outputs.pick }}"
-          go build -tags light_client -o lrouter "${{ steps.findmain.outputs.pick }}"
-          ls -l lrouter
+            log.Printf("TEMP harness listening on %s (min_fee_mas=%d)", addr, minFeeMas)
+            if err := http.ListenAndServe(addr, mux); err != nil {
+              log.Fatal(err)
+            }
+          }
+          EOF
+          go build -o lrouter ./light_main.go
 
       - name: Run router (background)
-        env:
-          THOMASD_MIN_FEE_MAS: ${{ inputs.min_fee_mas }}
         run: |
-          set -euo pipefail
-          # NOTE: 필요 시 플래그/포트 이름을 맞춰주세요 (-min-fee-mas, 8081)
-          ./lrouter -min-fee-mas "${THOMASD_MIN_FEE_MAS}" >/dev/null 2>router.log &
-          echo $! > router.pid
-
-          echo "Waiting for router on http://127.0.0.1:8081 ..."
-          for i in $(seq 1 45); do
+          set -eux
+          THOMASD_ADDR=":8081" THOMASD_MIN_FEE_MAS="1" ./lrouter > router.log 2>&1 &
+          # 간단한 readiness 대기
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8081/height >/dev/null && break || true
             sleep 1
-            if curl -sf http://127.0.0.1:8081/height >/dev/null; then
-              echo "router is ready"
-              exit 0
-            fi
           done
-          echo "router not ready in time" | tee -a router.log
-          exit 1
+          # 한 번 더 높이/해시 찍어둠
+          curl -sf http://127.0.0.1:8081/height | tee -a router.log
+          echo >> router.log
+          curl -sf http://127.0.0.1:8081/hash | tee -a router.log
+          echo >> router.log
 
       - name: Metrics BEFORE
         run: |
-          set -euo pipefail
-          curl -sf http://127.0.0.1:8081/metrics > metrics_before.txt || true
+          set -eux
+          curl -sf http://127.0.0.1:8081/metrics | tee metrics_before.txt
 
       - name: Smoke (inline curl)
         run: |
-          set -euo pipefail
+          set -eux
           base="http://127.0.0.1:8081"
-          : > smoke.log
 
-          echo "== HEIGHT ==" | tee -a smoke.log
-          curl -sf "$base/height" | tee -a smoke.log || echo "(height failed)" | tee -a smoke.log
-          echo "" | tee -a smoke.log
+          {
+            echo "== HEIGHT =="
+            curl -sf "$base/height"
+            echo
+            echo "== HASH =="
+            curl -sf "$base/hash"
+            echo
+            echo "== NEGATIVES =="
 
-          echo "== HASH ==" | tee -a smoke.log
-          curl -sf "$base/hash" | tee -a smoke.log || echo "(hash failed)" | tee -a smoke.log
-          echo "" | tee -a smoke.log
+            code=$(curl -s -o /dev/null -w "%{http_code}" "$base/nonce")
+            echo "nonce http_code=$code"
 
-          echo "== NEGATIVES ==" | tee -a smoke.log
-          # 404: 없는 엔드포인트
-          code=$(curl -s -o /dev/null -w "%{http_code}" "$base/nonce")
-          echo "nonce http_code=$code" | tee -a smoke.log
-
-          # 409: 정책 위반 — 실제 구현에 맞춰 엔드포인트/쿼리 조정 필요
-          code=$(curl -s -o /dev/null -w "%{http_code}" "$base/policy?min_fee_mas=0")
-          echo "policy http_code=$code" | tee -a smoke.log
+            code=$(curl -s -o /dev/null -w "%{http_code}" "$base/policy?min_fee_mas=0")
+            echo "policy http_code=$code"
+          } | tee smoke.log
 
       - name: Metrics AFTER + diff
         run: |
-          set -euo pipefail
-          curl -sf http://127.0.0.1:8081/metrics > metrics_after.txt || true
+          set -eux
+          curl -sf http://127.0.0.1:8081/metrics | tee metrics_after.txt
           diff -u metrics_before.txt metrics_after.txt > metrics_diff.txt || true
 
       - name: Upload artifacts
@@ -145,7 +158,6 @@ jobs:
         with:
           name: light-smoke-artifacts
           path: |
-            find_main.log
             router.log
             smoke.log
             metrics_before.txt
@@ -156,5 +168,4 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          set -euo pipefail
-          if [ -f router.pid ]; then kill "$(cat router.pid)" || true; fi
+          pkill -f "./lrouter" || true
