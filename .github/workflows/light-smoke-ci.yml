@@ -20,9 +20,7 @@ jobs:
         with:
           go-version: '1.22'
 
-      # === 임시 하네스: 러너 안에서 즉석으로 라이트 라우터 모의 서버 작성·빌드 ===
-      # 실제 라우터 메인이 준비되면 이 블록을 제거하고,
-      # 리포의 cmd/lightrouter/main.go를 빌드해서 실행하는 단계로 대체하세요.
+      # === TEMP HARNESS: 실제 라우터 메인 나오기 전까지 러너에서 즉석 서버 ===
       - name: Write tiny light-router harness (TEMP)
         run: |
           set -eux
@@ -47,14 +45,12 @@ jobs:
           )
 
           func metrics(w http.ResponseWriter, r *http.Request) {
-            // 아주 단순한 텍스트 메트릭스
             fmt.Fprintf(w, "router_height %d\n", atomic.LoadUint64(&height))
             fmt.Fprintf(w, "router_not_found_total %d\n", atomic.LoadUint64(&notFound))
             fmt.Fprintf(w, "router_policy_conflict_total %d\n", atomic.LoadUint64(&policyConflict))
           }
 
           func main() {
-            // 환경/플래그 모사: THOMASD_MIN_FEE_MAS 있으면 반영
             if v := os.Getenv("THOMASD_MIN_FEE_MAS"); v != "" {
               if n, err := strconv.ParseInt(v, 10, 64); err == nil {
                 minFeeMas = n
@@ -67,29 +63,25 @@ jobs:
 
             mux := http.NewServeMux()
             mux.HandleFunc("/height", func(w http.ResponseWriter, r *http.Request) {
-              // height 증가 느낌만
               h := atomic.AddUint64(&height, 1)
               fmt.Fprintf(w, "%d", h)
             })
             mux.HandleFunc("/hash", func(w http.ResponseWriter, r *http.Request) {
-              // 해시도 흉내만 (시간기반)
               fmt.Fprintf(w, "hash_%d", time.Now().UnixNano())
             })
             mux.HandleFunc("/metrics", metrics)
 
-            // 존재하지 않는 /nonce에 대한 404 카운트
             mux.HandleFunc("/nonce", func(w http.ResponseWriter, r *http.Request) {
               atomic.AddUint64(&notFound, 1)
               http.NotFound(w, r)
             })
 
-            // 정책 위반 409 모사: /policy?min_fee_mas=<n>, n < minFeeMas면 409
             mux.HandleFunc("/policy", func(w http.ResponseWriter, r *http.Request) {
               q := r.URL.Query().Get("min_fee_mas")
               n, _ := strconv.ParseInt(q, 10, 64)
               if n < minFeeMas {
                 atomic.AddUint64(&policyConflict, 1)
-                w.WriteHeader(http.StatusConflict) // 409
+                w.WriteHeader(http.StatusConflict)
                 fmt.Fprintf(w, `{"error":"policy_conflict","need_min_fee_mas":%d}`, minFeeMas)
                 return
               }
@@ -109,12 +101,10 @@ jobs:
         run: |
           set -eux
           THOMASD_ADDR=":8081" THOMASD_MIN_FEE_MAS="1" ./lrouter > router.log 2>&1 &
-          # 간단한 readiness 대기
           for i in $(seq 1 30); do
             curl -sf http://127.0.0.1:8081/height >/dev/null && break || true
             sleep 1
           done
-          # 한 번 더 높이/해시 찍어둠
           curl -sf http://127.0.0.1:8081/height | tee -a router.log
           echo >> router.log
           curl -sf http://127.0.0.1:8081/hash | tee -a router.log
@@ -129,7 +119,6 @@ jobs:
         run: |
           set -eux
           base="http://127.0.0.1:8081"
-
           {
             echo "== HEIGHT =="
             curl -sf "$base/height"
@@ -138,10 +127,8 @@ jobs:
             curl -sf "$base/hash"
             echo
             echo "== NEGATIVES =="
-
             code=$(curl -s -o /dev/null -w "%{http_code}" "$base/nonce")
             echo "nonce http_code=$code"
-
             code=$(curl -s -o /dev/null -w "%{http_code}" "$base/policy?min_fee_mas=0")
             echo "policy http_code=$code"
           } | tee smoke.log
