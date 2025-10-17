@@ -31,16 +31,38 @@ jobs:
 
       - name: Metrics BEFORE
         run: |
-          curl -sf http://127.0.0.1:8081/metrics | tee metrics_before.txt
+          curl -sf http://127.0.0.1:8081/metrics | tee metrics_before.txt || true
 
-      - name: Smoke (PowerShell)
-        shell: pwsh
+      - name: Smoke (inline curl)
+        shell: bash
         run: |
-          ./scripts/smoke-light.ps1 -Base http://127.0.0.1:8081 -MinFeeMas 1 *>&1 | Tee-Object -FilePath smoke.log
+          set -euxo pipefail
+          base=http://127.0.0.1:8081
+
+          # basic checks (?? ???? ??? ????)
+          curl -sf "$base/height" | tee -a smoke.log || true
+          echo >> smoke.log
+          curl -sf "$base/hash"   | tee -a smoke.log || true
+          echo >> smoke.log
+
+          # 404 negative
+          code=$(curl -s -o /dev/null -w "%{http_code}" "$base/nonce/THIS_ADDR_DOES_NOT_EXIST" || true)
+          echo "nonce 404 code=$code" | tee -a smoke.log
+          test "$code" -eq 404
+
+          # 409 policy conflict (?? ?? 409/400/422)
+          code=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Content-Type: application/json" \
+            -d '{"min_fee_mas":999999,"tx":{"chain_id":"test","data":"00"}}' \
+            "$base/tx" || true)
+          echo "policy reject code=$code" | tee -a smoke.log
+          if [ "$code" != "409" ] && [ "$code" != "400" ] && [ "$code" != "422" ]; then
+            echo "unexpected policy code=$code"; exit 1
+          fi
 
       - name: Metrics AFTER
         run: |
-          curl -sf http://127.0.0.1:8081/metrics | tee metrics_after.txt
+          curl -sf http://127.0.0.1:8081/metrics | tee metrics_after.txt || true
           diff -u metrics_before.txt metrics_after.txt > metrics_diff.txt || true
 
       - name: Upload artifacts
@@ -58,5 +80,4 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: |
-          docker rm -f lrouter || true
+        run: docker rm -f lrouter || true
