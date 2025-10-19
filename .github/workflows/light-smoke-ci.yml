@@ -1,12 +1,7 @@
-name: light-smoke (CI)
+﻿name: light-smoke (CI)
 
 on:
   workflow_dispatch:
-    inputs:
-      digest:
-        description: "Router image digest (e.g. sha256:46ef?ea051)"
-        required: true
-        type: string
 
 jobs:
   smoke:
@@ -17,29 +12,130 @@ jobs:
       actions: read
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Pull image by digest
-        run: |
-          docker pull ghcr.io/dopalos/thomasd@${{ inputs.digest }}
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
 
-      - name: Run router (bg)
+      # === TEMP HARNESS: 실제 라우터 메인 나오기 전까지 러너에서 즉석 서버 ===
+      - name: Write tiny light-router harness (TEMP)
         run: |
-          docker run -d --name lrouter -p 8081:8081 ghcr.io/dopalos/thomasd@${{ inputs.digest }}
-          sleep 2
-          docker logs lrouter > router.log 2>&1 || true
+          set -eux
+          cat > light_main.go << 'EOF'
+          package main
+
+          import (
+            "fmt"
+            "log"
+            "net/http"
+            "os"
+            "strconv"
+            "sync/atomic"
+            "time"
+          )
+
+          var (
+            height uint64
+            notFound uint64
+            policyConflict uint64
+            minFeeMas int64 = 1
+          )
+
+          func metrics(w http.ResponseWriter, r *http.Request) {
+            fmt.Fprintf(w, "router_height %d\n", atomic.LoadUint64(&height))
+            fmt.Fprintf(w, "router_not_found_total %d\n", atomic.LoadUint64(&notFound))
+            fmt.Fprintf(w, "router_policy_conflict_total %d\n", atomic.LoadUint64(&policyConflict))
+          }
+
+          func main() {
+            if v := os.Getenv("THOMASD_MIN_FEE_MAS"); v != "" {
+              if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+                minFeeMas = n
+              }
+            }
+            addr := ":8081"
+            if v := os.Getenv("THOMASD_ADDR"); v != "" {
+              addr = v
+            }
+
+            mux := http.NewServeMux()
+            mux.HandleFunc("/height", func(w http.ResponseWriter, r *http.Request) {
+              h := atomic.AddUint64(&height, 1)
+              fmt.Fprintf(w, "%d", h)
+            })
+            mux.HandleFunc("/hash", func(w http.ResponseWriter, r *http.Request) {
+              fmt.Fprintf(w, "hash_%d", time.Now().UnixNano())
+            })
+            mux.HandleFunc("/metrics", metrics)
+
+            mux.HandleFunc("/nonce", func(w http.ResponseWriter, r *http.Request) {
+              atomic.AddUint64(&notFound, 1)
+              http.NotFound(w, r)
+            })
+
+            mux.HandleFunc("/policy", func(w http.ResponseWriter, r *http.Request) {
+              q := r.URL.Query().Get("min_fee_mas")
+              n, _ := strconv.ParseInt(q, 10, 64)
+              if n < minFeeMas {
+                atomic.AddUint64(&policyConflict, 1)
+                w.WriteHeader(http.StatusConflict)
+                fmt.Fprintf(w, `{"error":"policy_conflict","need_min_fee_mas":%d}`, minFeeMas)
+                return
+              }
+              w.WriteHeader(http.StatusOK)
+              fmt.Fprintf(w, `{"ok":true}`)
+            })
+
+            log.Printf("TEMP harness listening on %s (min_fee_mas=%d)", addr, minFeeMas)
+            if err := http.ListenAndServe(addr, mux); err != nil {
+              log.Fatal(err)
+            }
+          }
+          EOF
+          go build -o lrouter ./light_main.go
+
+      - name: Run router (background)
+        run: |
+          set -eux
+          THOMASD_ADDR=":8081" THOMASD_MIN_FEE_MAS="1" ./lrouter > router.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8081/height >/dev/null && break || true
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8081/height | tee -a router.log
+          echo >> router.log
+          curl -sf http://127.0.0.1:8081/hash | tee -a router.log
+          echo >> router.log
 
       - name: Metrics BEFORE
         run: |
+          set -eux
           curl -sf http://127.0.0.1:8081/metrics | tee metrics_before.txt
 
-      - name: Smoke (PowerShell)
-        shell: pwsh
+      - name: Smoke (inline curl)
         run: |
-          ./scripts/smoke-light.ps1 -Base http://127.0.0.1:8081 -MinFeeMas 1 *>&1 | Tee-Object -FilePath smoke.log
+          set -eux
+          base="http://127.0.0.1:8081"
+          {
+            echo "== HEIGHT =="
+            curl -sf "$base/height"
+            echo
+            echo "== HASH =="
+            curl -sf "$base/hash"
+            echo
+            echo "== NEGATIVES =="
+            code=$(curl -s -o /dev/null -w "%{http_code}" "$base/nonce")
+            echo "nonce http_code=$code"
+            code=$(curl -s -o /dev/null -w "%{http_code}" "$base/policy?min_fee_mas=0")
+            echo "policy http_code=$code"
+          } | tee smoke.log
 
-      - name: Metrics AFTER
+      - name: Metrics AFTER + diff
         run: |
+          set -eux
           curl -sf http://127.0.0.1:8081/metrics | tee metrics_after.txt
           diff -u metrics_before.txt metrics_after.txt > metrics_diff.txt || true
 
@@ -49,8 +145,8 @@ jobs:
         with:
           name: light-smoke-artifacts
           path: |
-            smoke.log
             router.log
+            smoke.log
             metrics_before.txt
             metrics_after.txt
             metrics_diff.txt
@@ -59,4 +155,4 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          docker rm -f lrouter || true
+          pkill -f "./lrouter" || true
