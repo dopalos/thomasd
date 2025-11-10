@@ -3,6 +3,7 @@ module thomasd
 go 1.25.0
 
 require (
+	github.com/dopalos/thomasd v0.0.0-00010101000000-000000000000
 	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/tyler-smith/go-bip39 v1.1.0
 	github.com/zeebo/blake3 v0.2.4
@@ -14,3 +15,5 @@ require (
 	github.com/klauspost/cpuid/v2 v2.0.12 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 )
+
+replace github.com/dopalos/thomasd => .

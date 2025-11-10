@@ -1,0 +1,73 @@
+name: Promote Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag name (e.g., v0.3.1-rc3 or v0.3.2)"
+        required: true
+      verify_smoke:
+        description: "Re-run & require main light-smoke success before tagging"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve light-smoke workflow path
+        id: wf
+        run: |
+          set -euo pipefail
+          WF="${{ github.workspace }}/_wf"
+          gh api repos/${{ github.repository }}/actions/workflows?per_page=100 > "$WF.json"
+          PATH_HINT=".github/workflows/light-smoke-ci.yml"
+          WF_PATH=$(jq -r --arg H "$PATH_HINT" '.workflows[] | select(.path==$H or .name==$H or (.path|contains($H)) or (.name|contains($H))) | .path' "$WF.json" | head -n1)
+          if [ -z "$WF_PATH" ]; then
+            echo "::error::light-smoke workflow not found"
+            exit 1
+          fi
+          echo "path=$WF_PATH" >> $GITHUB_OUTPUT
+
+      - name: Optionally re-run main smoke
+        if: ${{ inputs.verify_smoke }}
+        run: |
+          set -euo pipefail
+          gh workflow run "${{ steps.wf.outputs.path }}" -r main
+          for i in $(seq 1 120); do
+            RUN=$(gh run list --workflow "${{ steps.wf.outputs.path }}" --branch main -L 1 --json databaseId,url,status,conclusion | jq -r '.[0]')
+            URL=$(echo "$RUN" | jq -r '.url')
+            ST=$(echo "$RUN" | jq -r '.status')
+            CO=$(echo "$RUN" | jq -r '.conclusion')
+            echo "[RUN] $URL  $ST/$CO"
+            if [ "$ST" = "completed" ] && [ "$CO" != "null" ]; then
+              test "$CO" = "success" || { echo "::error::main smoke not green"; exit 1; }
+              break
+            fi
+            sleep 5
+          done
+
+      - name: Compute main SHA
+        id: sha
+        run: |
+          set -euo pipefail
+          SHA=$(gh api repos/${{ github.repository }}/git/ref/heads/main --jq .object.sha)
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+          echo "[INFO] main sha=$SHA"
+
+      - name: Create tag and release
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          SHA="${{ steps.sha.outputs.sha }}"
+          git config --global user.email "actions@github.com"
+          git config --global user.name "github-actions[bot]"
+          git fetch origin
+          git tag -a "$TAG" "$SHA" -m "$TAG"
+          git push origin "$TAG"
+          gh release create "$TAG" -t "$TAG" --generate-notes

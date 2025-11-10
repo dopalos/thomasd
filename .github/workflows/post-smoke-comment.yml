@@ -9,87 +9,78 @@ permissions:
   contents: read
   actions: read
   pull-requests: write
+  issues: write
 
 jobs:
   comment:
+    # 성공/실패일 때만 코멘트 남김 (취소/스킵 제외)
     if: ${{ github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts from triggering run
-        uses: dawidd6/action-download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          run_id: ${{ github.event.workflow_run.id }}
+          # 다른 워크플로우(run)에서 받은 것이므로 run-id 지정이 필수
+          run-id: ${{ github.event.workflow_run.id }}
           path: artifacts
-          merge_multiple: true
+          merge-multiple: true
 
-      - name: Build comment body
-        id: build
+      - name: Build body & resolve target (PR or commit)
+        id: prep
         shell: bash
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
           RUN_STATUS: ${{ github.event.workflow_run.status }}
           RUN_CONCL: ${{ github.event.workflow_run.conclusion }}
           RUN_UPDATED: ${{ github.event.workflow_run.updated_at }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
           set -euo pipefail
-          cd artifacts || { mkdir -p artifacts && cd artifacts; }
 
-          exists() { test -f "$1"; }
+          mkdir -p artifacts
+          cd artifacts
 
-          body="$(cat <<'EOF'
-### light-smoke (CI) — Latest
-- Run: RUN_URL
-- Status: RUN_STATUS / Conclusion: RUN_CONCL
-- Updated: RUN_UPDATED
+          m() { [ -f "$1" ] && echo "✅" || echo "⚠️ (missing)"; }
 
-#### Artifacts
-- smoke.log: SMOKE_MARK
-- metrics_diff.txt: DIFF_MARK
-- metrics_after.txt: AFTER_MARK
-- router.log: ROUTER_MARK
-
-EOF
-)"
-
-          mark_ok="✅"; mark_miss="⚠️ (missing)"
-          s_mark="$mark_miss"; d_mark="$mark_miss"; a_mark="$mark_miss"; r_mark="$mark_miss"
-
-          if exists smoke.log; then s_mark="$mark_ok"; fi
-          if exists metrics_diff.txt; then d_mark="$mark_ok"; fi
-          if exists metrics_after.txt; then a_mark="$mark_ok"; fi
-          if exists router.log; then r_mark="$mark_ok"; fi
-
-          body="${body/RUN_URL/$RUN_URL}"
-          body="${body/RUN_STATUS/$RUN_STATUS}"
-          body="${body/RUN_CONCL/$RUN_CONCL}"
-          body="${body/RUN_UPDATED/$RUN_UPDATED}"
-          body="${body/SMOKE_MARK/$s_mark}"
-          body="${body/DIFF_MARK/$d_mark}"
-          body="${body/AFTER_MARK/$a_mark}"
-          body="${body/ROUTER_MARK/$r_mark}"
+          {
+            echo "### light-smoke (CI) — Latest"
+            echo "- Run: ${RUN_URL}"
+            echo "- Status: ${RUN_STATUS} / Conclusion: ${RUN_CONCL}"
+            echo "- Updated: ${RUN_UPDATED}"
+            echo
+            echo "#### Artifacts"
+            echo "- smoke.log: $(m smoke.log)"
+            echo "- metrics_diff.txt: $(m metrics_diff.txt)"
+            echo "- metrics_after.txt: $(m metrics_after.txt)"
+            echo "- router.log: $(m router.log)"
+            echo
+          } > body.md
 
           add_block () {
-            local title="$1"; shift
-            local file="$1"; shift
-            local head_or_tail="$1"; shift
-            local n="$1"; shift
-            if exists "$file"; then
-              printf '\n#### %s\n```text\n' "$title" >> body.md
-              if [ "$head_or_tail" = "tail" ]; then tail -n "$n" -- "$file" >> body.md || true
-              else head -n "$n" -- "$file" >> body.md || true
+            local title="$1" file="$2" mode="$3" n="$4"
+            [ -f "$file" ] || return 0
+            {
+              echo
+              echo "#### ${title}"
+              echo '```text'
+              if [ "$mode" = "tail" ]; then
+                tail -n "$n" -- "$file" || true
+              else
+                head -n "$n" -- "$file" || true
               fi
-              printf '```\n' >> body.md
-            fi
+              echo '```'
+            } >> body.md
           }
 
-          printf "%s\n" "$body" > body.md
-          add_block "smoke.log (last 40 lines)" "smoke.log" "tail" 40
-          add_block "metrics_diff.txt (first 120 lines)" "metrics_diff.txt" "head" 120
-          add_block "metrics_after.txt (first 60 lines)" "metrics_after.txt" "head" 60
-          add_block "router.log (last 30 lines)" "router.log" "tail" 30
+          add_block "smoke.log (last 40 lines)"              "smoke.log"         tail 40
+          add_block "metrics_diff.txt (first 120 lines)"     "metrics_diff.txt"  head 120
+          add_block "metrics_after.txt (first 60 lines)"     "metrics_after.txt" head 60
+          add_block "router.log (last 30 lines)"             "router.log"        tail 30
 
-          cat >>body.md <<'MD'
+          cat >> body.md <<'MD'
 
 ---
 @codex
@@ -102,12 +93,21 @@ EOF
   - Reply with run link & artifact snippets
 MD
 
-          # 추적 정보
-          pr_number=$(jq -r '.workflow_run.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH" || true)
-          commit_sha=$(jq -r '.workflow_run.head_sha' "$GITHUB_EVENT_PATH")
+          # 1) workflow_run payload에서 PR 번호 시도
+          pr_num="$(jq -r '.workflow_run.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH" 2>/dev/null || true)"
 
-          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
-          echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
+          # 2) 없다면 HEAD 브랜치로 PR 검색 (open 우선, 없으면 closed)
+          if [ -z "${pr_num}" ] && [ -n "${HEAD_BRANCH:-}" ]; then
+            q="repo:${REPO}+type:pr+head:${HEAD_BRANCH}+state:open"
+            pr_num="$(gh api -X GET "search/issues" -f q="${q}" --jq '.items[0].number' 2>/dev/null || true)"
+            if [ -z "${pr_num}" ] || [ "${pr_num}" = "null" ]; then
+              q="repo:${REPO}+type:pr+head:${HEAD_BRANCH}+state:closed"
+              pr_num="$(gh api -X GET "search/issues" -f q="${q}" --jq '.items[0].number' 2>/dev/null || true)"
+            fi
+          fi
+
+          echo "pr_number=${pr_num}" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Post comment to PR or commit
         env:
@@ -115,12 +115,16 @@ MD
         shell: bash
         run: |
           set -euo pipefail
-          pr="${{ steps.build.outputs.pr_number }}"
-          sha="${{ steps.build.outputs.commit_sha }}"
-          if [ -n "$pr" ]; then
-            gh pr comment "$pr" --body-file artifacts/body.md
-            echo "commented on PR #$pr"
+          cd artifacts
+          PR="${{ steps.prep.outputs.pr_number }}"
+          SHA="${{ steps.prep.outputs.head_sha }}"
+          if [ -n "$PR" ] && [ "$PR" != "null" ]; then
+            # PR 코멘트는 gh pr comment가 가장 안전
+            gh pr comment "$PR" --body-file body.md
+            echo "commented on PR #$PR"
           else
-            gh api repos/${{ github.repository }}/commits/$sha/comments -f body="$(cat artifacts/body.md)"
-            echo "commented on commit $sha"
+            # 커밋 코멘트는 REST API 사용
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/commits/${SHA}/comments" \
+              -f body="$(cat body.md)"
+            echo "commented on commit $SHA"
           fi
